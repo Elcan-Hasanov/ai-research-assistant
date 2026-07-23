@@ -1,28 +1,27 @@
-import os
 import logging
 import psycopg2
 import requests
-from dotenv import load_dotenv
 
-# Yeni modüllerimizden sınıfları çekiyoruz!
+# Yeni config yapımızı çağırıyoruz
+from app.core.config import get_settings
 from app.scrapers.arxiv_client import ArxivClient
 from app.repositories.article_repository import DatabaseManager
 
-# 1. Ortam Değişkenlerini ve Log Yapılandırmasını Kuruyoruz
-load_dotenv()
-
+# 1. Log Yapılandırması
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# 2. Veritabanı Parametreleri ve URL (Adım 3'te config.py'a taşınacak)
+# 2. Ayarları Merkezi Settings Nesnesinden Alıyoruz
+settings = get_settings()
+
 connection_params = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": str(os.getenv("DB_PASSWORD")),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
+    "dbname": settings.db_name,
+    "user": settings.db_user,
+    "password": settings.db_password,
+    "host": settings.db_host,
+    "port": settings.db_port
 }
 
 arxiv_url = "http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=5&sortBy=submittedDate&sortOrder=descending"
