@@ -2,8 +2,7 @@ import sys
 import logging
 import psycopg2
 
-# Eğer V1'de UPSERT_SORGUSU bağımsız bir değişkense, onu da buraya eklemelisin:
-UPSERT_SORGUSU = """
+UPSERT_QUERY = """
 INSERT INTO articles (arxiv_id, title, summary, authors, categories, published_at)
 VALUES (%s, %s, %s, %s, %s, %s)
 ON CONFLICT (arxiv_id) DO UPDATE SET
@@ -20,9 +19,9 @@ class DatabaseManager:
             self.conn = psycopg2.connect(**connection_params)
             self.cursor = self.conn.cursor()
         except psycopg2.OperationalError as e:
-            logging.error("Veritabanına bağlanılamadı!")
-            logging.error("Lütfen PostgreSQL servisinin çalıştığından ve .env bilgilerinin doğru olduğundan emin olun.")
-            logging.error(f"Sistem Mesajı: {e}")
+            logging.error("Failed to connect to the database.")
+            logging.error("Please ensure the PostgreSQL service is running and .env settings are correct.")
+            logging.error(f"System message: {e}")
             sys.exit(1)
 
     def save_article(self, article_data):
