@@ -25,7 +25,7 @@ class DatabaseManager:
             sys.exit(1)
 
     def save_article(self, article_data):
-        self.cursor.execute(UPSERT_SORGUSU, (
+        self.cursor.execute(UPSERT_QUERY, (
             article_data["arxiv_id"],
             article_data["title"],
             article_data["summary"],
