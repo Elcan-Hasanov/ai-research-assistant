@@ -1,72 +1,99 @@
 import logging
-import psycopg2
 import requests
+import asyncio
+import asyncpg
+from datetime import datetime
 
-# Yeni config yapımızı çağırıyoruz
-from app.core.config import get_settings
+from app.core.database import get_standalone_db_connection
 from app.scrapers.arxiv_client import ArxivClient
-from app.repositories.article_repository import DatabaseManager
+from app.repositories.article_repository import ArticleRepository
 
-# 1. Log Yapılandırması
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# 2. Ayarları Merkezi Settings Nesnesinden Alıyoruz
-settings = get_settings()
 
-connection_params = {
-    "dbname": settings.db_name,
-    "user": settings.db_user,
-    "password": settings.db_password,
-    "host": settings.db_host,
-    "port": settings.db_port
-}
-
+# arXiv API endpoint for fetching recent AI research papers
 arxiv_url = "http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=5&sortBy=submittedDate&sortOrder=descending"
 
-# 3. İstemci Hazırlığı
+
 client = ArxivClient()
-db = None
 
-# 4. Senin Taşıdığın Akış Bloğu
-try:
-    db = DatabaseManager(connection_params)
-    
-    soup = client.fetch_raw_data(arxiv_url)
-    entries = soup.find_all("entry")
 
-    for entry in entries:
-        try:
-            article_data = client.parse_entry(entry)
-            db.save_article(article_data)
-            logging.info(f"Makale işlendi: {article_data['title'][:40]}...")
+async def main():
+    conn = None
 
-        except AttributeError as e:
-            logging.warning(f"Bir makale eksik/bozuk veri içeriyor, atlanıyor. Detay: {e}")
-            continue
+    try:
+        # Create a standalone database connection for script execution
+        conn = await get_standalone_db_connection()
+        db = ArticleRepository(conn)
 
-        except psycopg2.Error as db_err:
-            logging.error(f"Kayıt başarısız: {db_err}")
-            db.rollback()
-            continue
+        # Fetch raw XML data from arXiv API
+        soup = client.fetch_raw_data(arxiv_url)
+        entries = soup.find_all("entry")
 
-    logging.info("Veritabanından güncel veriler okunuyor...")
-    articles = db.get_articles()
-    for row in articles:
-        arxiv_id, title, categories, published_at = row
-        print(f"[{published_at.date()}] {title}")
-        print(f"   Kategori: {categories}")
-        print(f"   ID: {arxiv_id}")
-        print("-" * 60)
+        # Process each article independently to prevent one failure from stopping the whole process
+        for entry in entries:
+            try:
+                article_data = client.parse_entry(entry)
 
-except requests.exceptions.RequestException as e:
-    logging.error(f"İnternet hatası: {e}")
+                await db.upsert_article(
+                    arxiv_id=article_data["arxiv_id"],
+                    title=article_data["title"],
+                    summary=article_data["summary"],
+                    authors=article_data["authors"],
+                    categories=article_data["categories"],
+                    published_at=article_data["published_at"],
+                )
 
-except psycopg2.DatabaseError as e:
-    logging.error(f"Veritabanı hatası: {e}")
+                logging.info(
+                    f"Article processed: {article_data['title'][:40]}..."
+                )
 
-finally:
-    if db is not None:
-        db.close()
+            except AttributeError as e:
+                logging.warning(
+                    f"Article contains invalid data and was skipped. Details: {e}"
+                )
+                continue
+
+            except asyncpg.PostgresError as db_err:
+                logging.error(f"Database save error: {db_err}")
+                continue
+
+            except Exception as e:
+                logging.error(f"Unexpected error while processing article: {e}")
+                continue
+
+        # Read stored articles to verify successful data ingestion
+        logging.info("Reading latest stored articles from database...")
+        articles = await db.list_articles()
+
+        for row in articles:
+            arxiv_id = row["arxiv_id"]
+            title = row["title"]
+            categories = row["categories"]
+            published_at = row["published_at"]
+
+            date_display = published_at.date() if isinstance(published_at, datetime) else published_at
+
+            print(f"[{date_display}] {title}")
+            print(f"   Category: {categories}")
+            print(f"   ID: {arxiv_id}")
+            print("-" * 60)
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Internet error: {e}")
+
+    except Exception as e:
+        logging.error(f"Critical error in main process: {e}")
+
+    finally:
+        # Ensure database connection is closed after script execution
+        if conn is not None:
+            await conn.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

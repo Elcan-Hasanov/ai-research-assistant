@@ -1,4 +1,3 @@
-from fastapi import FastAPI
 from app.core.config import get_settings
 from app.core.database import lifespan, get_db_connection
 from fastapi import FastAPI, Depends
@@ -11,7 +10,6 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
-
 
 @app.get("/health", tags=["System"])
 async def health_check() -> dict:

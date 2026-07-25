@@ -34,3 +34,14 @@ async def get_db_connection(
 
     async with pool.acquire() as connection:
         yield connection
+
+async def get_standalone_db_connection() -> asyncpg.Connection:
+    """Provide a direct database connection for background scripts."""
+    settings = get_settings()
+    return await asyncpg.connect(
+        user=settings.db_user,
+        password=settings.db_password,
+        database=settings.db_name,
+        host=settings.db_host,
+        port=settings.db_port,
+    )

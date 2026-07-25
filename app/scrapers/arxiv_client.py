@@ -1,4 +1,5 @@
 import requests
+from datetime import datetime
 from bs4 import BeautifulSoup
 
 class ArxivClient:
@@ -10,7 +11,9 @@ class ArxivClient:
     def parse_entry(self, entry):
         title = entry.find("title").text.strip()
         summary = entry.find("summary").text.strip()
-        published_at = entry.find("published").text
+
+        published_raw = entry.find("published").text
+        published_at = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
 
         authors_list = [author.find("name").text for author in entry.find_all("author")]
         authors_str = ", ".join(authors_list)
