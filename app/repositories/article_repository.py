@@ -11,15 +11,31 @@ class ArticleRepository:
         self._connection = connection
 
     async def list_articles(
-        self, limit: int = 20, offset: int = 0
+        self, limit: int = 20, offset: int = 0, category: str | None = None
     ) -> list[asyncpg.Record]:
         """Fetch paginated articles sorted by publication date descending."""
 
-        query = "SELECT * FROM articles ORDER BY published_at DESC LIMIT $1 OFFSET $2"
-        return await self._connection.fetch(query, limit, offset)
+        pattern = f"%{category}%" if category else None
 
+        # $1: pattern (hem NULL kontrolü hem ILIKE için kullanılıyor)
+        # $2: limit
+        # $3: offset
+        query = """
+            SELECT arxiv_id, title, summary, authors, categories, published_at, updated_at
+            FROM articles
+            WHERE ($1::text IS NULL OR categories ILIKE $1)
+            ORDER BY published_at DESC
+            LIMIT $2 OFFSET $3;
+        """
+
+        return await self._connection.fetch(query, pattern, limit, offset)
+    
     async def get_by_arxiv_id(self, arxiv_id: str) -> asyncpg.Record | None:
-        query = "SELECT * FROM articles WHERE arxiv_id = $1"
+        query = """
+        SELECT arxiv_id, title, summary, authors, categories, published_at, updated_at 
+        FROM articles 
+        WHERE arxiv_id = $1
+        """
         return await self._connection.fetchrow(query, arxiv_id)
 
     async def upsert_article(

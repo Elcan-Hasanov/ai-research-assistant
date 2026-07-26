@@ -1,23 +1,35 @@
-from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
+
 
 class ArticleResponse(BaseModel):
-    title: str
-    authors: list[str]
     arxiv_id: str
-    summary: str
-    published_at: datetime
-    categories: list[str]
+    title: str
+    summary: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    published_at: datetime | None = None
+    updated_at: datetime | None = None
 
     @field_validator("authors", "categories", mode="before")
-    def validate_comma_separated_to_list(cls, v: str | list) -> list[str]:
+    def validate_comma_separated_to_list(
+        cls, v: str | list | None
+    ) -> list[str]:
+        # 1. Veritabanından NULL gelirse güvenle boş liste dön
+        if v is None:
+            return []
 
+        # 2. Virgülle ayrılmış string gelirse parçala
         if isinstance(v, str):
             cleaned_v = v.strip()
-            if not cleaned_v: 
+            if not cleaned_v:
                 return []
-            return [item.strip() for item in cleaned_v.split(",") if item.strip()]
+            return [
+                item.strip() for item in cleaned_v.split(",") if item.strip()
+            ]
+
         return v
+
 
 class ArticleFilterParams(BaseModel):
     category: str | None = None

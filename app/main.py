@@ -1,7 +1,9 @@
-from app.core.config import get_settings
-from app.core.database import lifespan, get_db_connection
-from fastapi import FastAPI, Depends
 import asyncpg
+from fastapi import Depends, FastAPI
+
+from app.api.routers import articles
+from app.core.config import get_settings
+from app.core.database import get_db_connection, lifespan
 
 settings = get_settings()
 
@@ -10,6 +12,8 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+app.include_router(articles.router)
 
 @app.get("/health", tags=["System"])
 async def health_check() -> dict:
