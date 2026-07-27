@@ -1,4 +1,5 @@
 from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -15,11 +16,11 @@ class ArticleResponse(BaseModel):
     def validate_comma_separated_to_list(
         cls, v: str | list | None
     ) -> list[str]:
-        # 1. Veritabanından NULL gelirse güvenle boş liste dön
+        """Normalize comma-separated strings into lists."""
+
         if v is None:
             return []
 
-        # 2. Virgülle ayrılmış string gelirse parçala
         if isinstance(v, str):
             cleaned_v = v.strip()
             if not cleaned_v:

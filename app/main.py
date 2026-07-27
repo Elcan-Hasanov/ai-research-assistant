@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 from app.api.routers import articles
 from app.core.config import get_settings
 from app.core.database import get_db_connection, lifespan
+from app.exceptions import register_exception_handlers
 
 settings = get_settings()
 
@@ -12,6 +13,8 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+register_exception_handlers(app)
 
 app.include_router(articles.router)
 

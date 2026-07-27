@@ -17,9 +17,6 @@ class ArticleRepository:
 
         pattern = f"%{category}%" if category else None
 
-        # $1: pattern (hem NULL kontrolü hem ILIKE için kullanılıyor)
-        # $2: limit
-        # $3: offset
         query = """
             SELECT arxiv_id, title, summary, authors, categories, published_at, updated_at
             FROM articles
