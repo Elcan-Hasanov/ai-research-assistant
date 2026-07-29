@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     db_host: str
     db_port: int = 5432
 
-    app_name: str = "ArXiv Research Assistant"
+    app_name: str = "AI Research Assistant API"
     app_version: str = "2.0.0"
 
     model_config = SettingsConfigDict(

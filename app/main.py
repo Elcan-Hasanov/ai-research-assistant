@@ -25,6 +25,8 @@ async def health_check() -> dict:
 @app.get("/health/ready", tags=["System"])
 async def readiness_check(
     conn: asyncpg.Connection = Depends(get_db_connection),
-):
+) -> dict:
+    """It checks the database connection and whether the system is ready to use."""
+    
     await conn.fetchval("SELECT 1")
     return {"status": "ready"}

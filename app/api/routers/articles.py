@@ -5,7 +5,6 @@ from app.repositories.article_repository import (
     get_article_repository,
 )
 from app.schemas.article import ArticleFilterParams, ArticleResponse
-from app.repositories.article_repository import ArticleRepository
 
 router = APIRouter(prefix="/articles", tags=["Articles"])
 
@@ -26,7 +25,20 @@ async def list_articles(
     return [ArticleResponse(**dict(record)) for record in records]
 
 
-@router.get("/{arxiv_id}", response_model=ArticleResponse)
+@router.get(
+    "/{arxiv_id}",
+    response_model=ArticleResponse,
+    responses={
+        404: {
+            "description": "Article not found.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Article with ID '2401.00001' not found"}
+                }
+            },
+        }
+    },
+)
 async def get_article_by_id(
     arxiv_id: str,
     repo: ArticleRepository = Depends(get_article_repository),
