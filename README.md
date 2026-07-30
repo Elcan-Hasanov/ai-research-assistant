@@ -51,19 +51,24 @@ Client ──► FastAPI Router ──► Repository Layer ──► PostgreSQL 
 ```text
 arxiv-research-assistant/
 │
-├── app/
-│   ├── api/                # Route handlers (health.py, articles.py)
-│   ├── core/               # App configuration, DB pool, global exception handlers
-│   ├── repositories/       # Data access layer & raw SQL queries (asyncpg)
-│   ├── schemas/            # Pydantic DTOs & validation schemas
-│   └── main.py             # FastAPI initialization & middlewares
+├── app/                        # Application core layer
+│   ├── api/                    # API routes and request handlers
+│   │   └── routers/            # Route modules (e.g., articles)
+│   ├── core/                   # Application configuration, DB pool & global exceptions
+│   ├── repositories/           # Data access layer (Raw SQL queries via asyncpg)
+│   ├── schemas/                # Pydantic DTOs & validation models
+│   ├── scrapers/               # External data ingestion clients (ArXiv API)
+│   ├── services/               # Business logic, search & reranking layer
+│   └── main.py                 # FastAPI application entry point & lifespan
 │
-├── scraper/                # V1.0 ArXiv data collection pipeline
+├── scripts/                    # Standalone automation & ETL scripts
+│   └── ingest_arxiv.py         # Script to fetch ArXiv data and populate DB
 │
-├── .env.example            # Template for environment variables
-├── requirements.txt        # Frozen dependency versions
-├── CHANGELOG.md            # Release history
-└── README.md               # Project documentation
+├── ai-research-assistant.ipynb # Jupyter notebook for experimentation & testing
+├── .env.example                # Environment variables template
+├── .gitignore                  # Git ignore rules
+├── CHANGELOG.md                # Project version history
+└── requirements.txt            # Project dependencies
 ```
 
 ---
@@ -127,7 +132,15 @@ APP_NAME="AI Research Assistant API"
 APP_VERSION="2.0.0"
 ```
 
-### 5. Start the Application
+### 5. Run Data Ingestion Script (Optional)
+
+To populate your local PostgreSQL database with research papers from ArXiv:
+
+```bash
+python -m scripts.ingest_arxiv
+```
+
+### 6. Start the Application
 
 ```bash
 uvicorn app.main:app --reload
@@ -157,11 +170,12 @@ FastAPI automatically generates interactive documentation. Once the app is runni
 
 ## 🗺️ Development Roadmap
 
-* [x] **v1.0:** CLI-based ArXiv Data Scraper & Ingestion Pipeline.
-* [x] **v2.0 (Current):** Async REST API Layer, PostgreSQL (`asyncpg`), Repository Pattern, DTO Validation.
-* [ ] **v3.0:** Docker Containerization & Docker Compose setup.
-* [ ] **v4.0:** Text Processing Foundations (TF-IDF & Classical Retrieval).
-* [ ] **v5.0:** Semantic Search with Vector Embeddings.
-* [ ] **v6.0:** LLM Integration & Automated Paper Summarization.
-* [ ] **v7.0:** Retrieval-Augmented Generation (RAG) System.
-* [ ] **v8.0:** Autonomous AI Research Agent Workflow.
+* [x] **V1.0 — Data Infrastructure:** Scraping, PostgreSQL integration, Data cleaning, Filtering, Modular OOP structure.
+* [x] **V2.0 — Backend Fundamentals:** FastAPI integration, Pydantic BaseSettings, Router architecture, Repository Pattern, Async API, Swagger UI.
+* [ ] **V3.0 — Retrieval Fundamentals + Semantic Search:** Keyword Search (TF-IDF, BM25), Embedding (Sentence Transformers), PostgreSQL pgvector integration, Vector search endpoints.
+* [ ] **V4.0 — LLM Application:** Native LLM API (OpenAI/Claude SDK), Prompt Template management, Structured Output (JSON responses), Response Streaming.
+* [ ] **V5.0 — RAG (Retrieval-Augmented Generation) System:** Chunking Engine, Hybrid Search (BM25 + Vector), Context Injection, Citation mechanism.
+* [ ] **V6.0 — Evaluation + Observability:** RAGAS metrics (Recall, Precision, Faithfulness), Langfuse / OpenTelemetry Tracing, Cost, Token and Latency tracking, Benchmark test dataset.
+* [ ] **V7.0 — Productionization:** Docker & Docker Compose configuration, GitHub Actions CI/CD pipeline, Environment/Secret Management, Background Workers (Redis + Celery / RQ).
+* [ ] **V8.0 — Agentic Research Assistant:** Tool Calling infrastructure, State & Workflow management (LangGraph etc.), Multi-step planning and cycles, Automatic report generation.
+* [ ] **V9.0 — Production Agent:** Human-in-the-Loop, Trajectory Evaluation, Memory Management, Failure Recovery & Fallback mechanisms.

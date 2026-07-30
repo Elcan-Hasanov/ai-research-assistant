@@ -1,10 +1,10 @@
 import asyncpg
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 
 from app.api.routers import articles
 from app.core.config import get_settings
 from app.core.database import get_db_connection, lifespan
-from app.exceptions import register_exception_handlers
+from app.core.exceptions import register_exception_handlers
 
 settings = get_settings()
 
@@ -27,6 +27,11 @@ async def readiness_check(
     conn: asyncpg.Connection = Depends(get_db_connection),
 ) -> dict:
     """It checks the database connection and whether the system is ready to use."""
-    
-    await conn.fetchval("SELECT 1")
-    return {"status": "ready"}
+    try:
+        await conn.fetchval("SELECT 1")
+        return {"status": "ready"}
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection is not ready",
+        )

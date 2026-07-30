@@ -12,7 +12,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.db_pool = await asyncpg.create_pool(
         user=settings.db_user,
-        password=settings.db_password,
+        password=settings.db_password.get_secret_value(),
         database=settings.db_name,
         host=settings.db_host,
         port=settings.db_port,
@@ -40,7 +40,7 @@ async def get_standalone_db_connection() -> asyncpg.Connection:
     settings = get_settings()
     return await asyncpg.connect(
         user=settings.db_user,
-        password=settings.db_password,
+        password=settings.db_password.get_secret_value(),
         database=settings.db_name,
         host=settings.db_host,
         port=settings.db_port,
