@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any, Dict
 import requests
@@ -30,9 +31,13 @@ class ArxivClient:
         ]
         categories_str = ", ".join(categories_list)
 
+        # Preserve category prefix for older arXiv IDs and trim trailing versioning safely
         arxiv_id_raw = entry.find("id").text
-        id_with_version = arxiv_id_raw.split("/")[-1]
-        clean_id = id_with_version.split("v")[0]
+        if "/abs/" in arxiv_id_raw:
+            raw_path = arxiv_id_raw.split("/abs/")[-1]
+        else:
+            raw_path = arxiv_id_raw.rstrip("/").split("/")[-1]
+        clean_id = re.sub(r"v\d+$", "", raw_path)
 
         return {
             "arxiv_id": clean_id,

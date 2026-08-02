@@ -47,14 +47,15 @@ class ArticleRepository:
         """Insert a new article or update fields if arxiv_id already exists."""
 
         query = """
-        INSERT INTO articles (arxiv_id, title, summary, authors, categories, published_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO articles (arxiv_id, title, summary, authors, categories, published_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
         ON CONFLICT (arxiv_id) DO UPDATE SET
             title = EXCLUDED.title,
             summary = EXCLUDED.summary,
             authors = EXCLUDED.authors,
             categories = EXCLUDED.categories,
-            published_at = EXCLUDED.published_at;
+            published_at = EXCLUDED.published_at,
+            updated_at = CURRENT_TIMESTAMP;
         """
         await self._connection.execute(
             query, arxiv_id, title, summary, authors, categories, published_at
