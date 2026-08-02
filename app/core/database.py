@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+
 import asyncpg
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+
 from app.core.config import get_settings
 
 
@@ -26,18 +28,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await app.state.db_pool.close()
 
 
-async def get_db_connection(
-    request: Request,
-) -> AsyncGenerator[asyncpg.Connection, None]:
-    """Provide a database connection from the pool for request scope."""
-    pool = request.app.state.db_pool
-
-    async with pool.acquire() as connection:
-        yield connection
-
 async def get_standalone_db_connection() -> asyncpg.Connection:
     """Provide a direct database connection for background scripts."""
     settings = get_settings()
+
     return await asyncpg.connect(
         user=settings.db_user,
         password=settings.db_password.get_secret_value(),

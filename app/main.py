@@ -1,9 +1,10 @@
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, status
 
+from app.api.dependencies import get_db_pool
 from app.api.routers import articles
 from app.core.config import get_settings
-from app.core.database import get_db_connection, lifespan
+from app.core.database import lifespan
 from app.core.exceptions import register_exception_handlers
 
 settings = get_settings()
@@ -18,17 +19,19 @@ register_exception_handlers(app)
 
 app.include_router(articles.router)
 
+
 @app.get("/health", tags=["System"])
 async def health_check() -> dict:
     return {"status": "ok"}
 
+
 @app.get("/health/ready", tags=["System"])
 async def readiness_check(
-    conn: asyncpg.Connection = Depends(get_db_connection),
+    pool: asyncpg.Pool = Depends(get_db_pool),
 ) -> dict:
     """It checks the database connection and whether the system is ready to use."""
     try:
-        await conn.fetchval("SELECT 1")
+        await pool.fetchval("SELECT 1")
         return {"status": "ready"}
     except Exception:
         raise HTTPException(

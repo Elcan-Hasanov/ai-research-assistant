@@ -1,28 +1,25 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.repositories.article_repository import (
-    ArticleRepository,
-    get_article_repository,
-)
+from app.api.dependencies import get_article_service
 from app.schemas.article import ArticleFilterParams, ArticleResponse
+from app.schemas.retrieval import PaginatedResponse
+from app.services.article_service import ArticleService
 
 router = APIRouter(prefix="/articles", tags=["Articles"])
 
 
-@router.get("", response_model=list[ArticleResponse])
+@router.get("", response_model=PaginatedResponse[ArticleResponse])
 async def list_articles(
     params: ArticleFilterParams = Depends(),
-    repo: ArticleRepository = Depends(get_article_repository),
-) -> list[ArticleResponse]:
-    """Return a paginated list of articles with optional filtering."""
+    service: ArticleService = Depends(get_article_service),
+) -> PaginatedResponse[ArticleResponse]:
+    """Return a paginated envelope of articles with optional filtering."""
 
-    records = await repo.list_articles(
+    return await service.list_articles(
         limit=params.limit,
         offset=params.offset,
         category=params.category,
     )
-
-    return [ArticleResponse(**dict(record)) for record in records]
 
 
 @router.get(
@@ -41,15 +38,14 @@ async def list_articles(
 )
 async def get_article_by_id(
     arxiv_id: str,
-    repo: ArticleRepository = Depends(get_article_repository),
+    service: ArticleService = Depends(get_article_service),
 ) -> ArticleResponse:
+    article = await service.get_by_arxiv_id(arxiv_id)
 
-    record = await repo.get_by_arxiv_id(arxiv_id)
-
-    if record is None:
+    if article is None:
         raise HTTPException(
             status_code=404,
             detail=f"Article with arxiv_id '{arxiv_id}' not found",
         )
 
-    return ArticleResponse(**dict(record))
+    return article
