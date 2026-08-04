@@ -29,21 +29,16 @@ class ArxivClient:
         categories_list = [
             cat.get("term") for cat in entry.find_all("category")
         ]
-        categories_str = ", ".join(categories_list)
 
-        # Preserve category prefix for older arXiv IDs and trim trailing versioning safely
         arxiv_id_raw = entry.find("id").text
-        if "/abs/" in arxiv_id_raw:
-            raw_path = arxiv_id_raw.split("/abs/")[-1]
-        else:
-            raw_path = arxiv_id_raw.rstrip("/").split("/")[-1]
-        clean_id = re.sub(r"v\d+$", "", raw_path)
+        id_with_prefix = arxiv_id_raw.split("abs/")[-1]
+        clean_id = re.sub(r"v\d+$", "", id_with_prefix)
 
         return {
             "arxiv_id": clean_id,
             "title": title,
             "summary": summary,
             "authors": authors_str,
-            "categories": categories_str,
+            "categories": categories_list,
             "published_at": published_at,
         }

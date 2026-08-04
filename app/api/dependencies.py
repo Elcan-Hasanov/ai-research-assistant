@@ -1,3 +1,4 @@
+from typing import AsyncGenerator
 import asyncpg
 from fastapi import Depends, Request
 
@@ -9,10 +10,12 @@ def get_db_pool(request: Request) -> asyncpg.Pool:
     return request.app.state.db_pool
 
 
-def get_article_repository(
+async def get_article_repository(
     pool: asyncpg.Pool = Depends(get_db_pool),
-) -> ArticleRepository:
-    return ArticleRepository(pool)
+) -> AsyncGenerator[ArticleRepository, None]:
+
+    async with pool.acquire() as connection:
+        yield ArticleRepository(connection)
 
 
 def get_article_service(

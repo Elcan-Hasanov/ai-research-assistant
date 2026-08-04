@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.dependencies import get_article_service
 from app.schemas.article import ArticleFilterParams, ArticleResponse
-from app.schemas.retrieval import PaginatedResponse
+from app.schemas.retrieval import PaginatedResponse, RetrievalResult, SearchParams
 from app.services.article_service import ArticleService
 
 router = APIRouter(prefix="/articles", tags=["Articles"])
@@ -19,6 +19,20 @@ async def list_articles(
         limit=params.limit,
         offset=params.offset,
         category=params.category,
+    )
+
+
+@router.get("/search", response_model=PaginatedResponse[RetrievalResult])
+async def search_articles(
+    params: SearchParams = Depends(),
+    service: ArticleService = Depends(get_article_service),
+) -> PaginatedResponse[RetrievalResult]:
+    """Lexical (keyword) search via PostgreSQL full-text search."""
+
+    return await service.search_articles(
+        query=params.q,
+        limit=params.limit,
+        offset=params.offset,
     )
 
 

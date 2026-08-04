@@ -1,9 +1,10 @@
 from app.repositories.article_repository import ArticleRepository
 from app.schemas.article import ArticleResponse
-from app.schemas.retrieval import PaginatedResponse
+from app.schemas.retrieval import PaginatedResponse, RetrievalResult
 
 
 class ArticleService:
+    """Orchestrates article retrieval and maps persistence records onto API contracts."""
 
     def __init__(self, repository: ArticleRepository) -> None:
         self._repository = repository
@@ -33,3 +34,29 @@ class ArticleService:
             return None
 
         return ArticleResponse(**dict(record))
+
+    async def search_articles(
+        self, query: str, limit: int, offset: int
+    ) -> PaginatedResponse[RetrievalResult]:
+        """Lexical (keyword) search. RetrievalResult.method = 'lexical'."""
+
+        records = await self._repository.search_articles(
+            query=query, limit=limit, offset=offset
+        )
+        total = await self._repository.count_search_results(query=query)
+
+        items = [
+            RetrievalResult(
+                document_id=record["arxiv_id"],
+                score=record["rank"],
+                method="lexical",
+            )
+            for record in records
+        ]
+
+        return PaginatedResponse[RetrievalResult](
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
