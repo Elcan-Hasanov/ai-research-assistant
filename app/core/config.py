@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from urllib.parse import quote_plus
 
 class Settings(BaseSettings):
     db_name: str
@@ -11,6 +12,12 @@ class Settings(BaseSettings):
 
     app_name: str = "AI Research Assistant API"
     app_version: str = "2.0.0"
+
+    @property
+    def database_url(self) -> str:
+        user = quote_plus(self.db_user)
+        password = quote_plus(self.db_password.get_secret_value())
+        return f"postgresql://{user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     model_config = SettingsConfigDict(
         env_file=".env",

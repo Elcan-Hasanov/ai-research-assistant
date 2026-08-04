@@ -12,7 +12,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle (DB connection pool)."""
     settings = get_settings()
 
-    app.state.db_pool = await asyncpg.create_pool(
+    app.state.pool = await asyncpg.create_pool(
         user=settings.db_user,
         password=settings.db_password.get_secret_value(),
         database=settings.db_name,
@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
-        await app.state.db_pool.close()
+        await app.state.pool.close()
 
 
 async def get_standalone_db_connection() -> asyncpg.Connection:

@@ -4,9 +4,11 @@ import asyncio
 import asyncpg
 from datetime import datetime
 
-from app.core.database import get_standalone_db_connection
+from app.core.config import get_settings 
 from app.scrapers.arxiv_client import ArxivClient
 from app.repositories.article_repository import ArticleRepository
+
+settings = get_settings()
 
 
 logging.basicConfig(
@@ -15,26 +17,26 @@ logging.basicConfig(
 )
 
 
-# arXiv API endpoint for fetching recent AI research papers
-arxiv_url = "http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=5&sortBy=submittedDate&sortOrder=descending"
+arxiv_url = (
+    "http://export.arxiv.org/api/query?"
+    "search_query=cat:cs.AI&start=0&max_results=100&"
+    "sortBy=submittedDate&sortOrder=descending"
+)
 
 
 client = ArxivClient()
 
 
 async def main():
-    conn = None
+    pool = None
 
     try:
-        # Create a standalone database connection for script execution
-        conn = await get_standalone_db_connection()
-        db = ArticleRepository(conn)
+        pool = await asyncpg.create_pool(dsn=settings.database_url)
+        db = ArticleRepository(pool)
 
-        # Fetch raw XML data from arXiv API
         soup = client.fetch_raw_data(arxiv_url)
         entries = soup.find_all("entry")
 
-        # Process each article independently to prevent one failure from stopping the whole process
         for entry in entries:
             try:
                 article_data = client.parse_entry(entry)
@@ -66,7 +68,6 @@ async def main():
                 logging.error(f"Unexpected error while processing article: {e}")
                 continue
 
-        # Read stored articles to verify successful data ingestion
         logging.info("Reading latest stored articles from database...")
         articles = await db.list_articles()
 
@@ -76,7 +77,11 @@ async def main():
             categories = row["categories"]
             published_at = row["published_at"]
 
-            date_display = published_at.date() if isinstance(published_at, datetime) else published_at
+            date_display = (
+                published_at.date()
+                if isinstance(published_at, datetime)
+                else published_at
+            )
 
             print(f"[{date_display}] {title}")
             print(f"   Category: {categories}")
@@ -90,9 +95,8 @@ async def main():
         logging.error(f"Critical error in main process: {e}")
 
     finally:
-        # Ensure database connection is closed after script execution
-        if conn is not None:
-            await conn.close()
+        if pool is not None:
+            await pool.close()
 
 
 if __name__ == "__main__":
