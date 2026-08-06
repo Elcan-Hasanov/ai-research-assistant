@@ -10,7 +10,7 @@ class ArticleRepository:
 
     async def list_articles(
         self, limit: int = 20, offset: int = 0, category: str | None = None
-    ) -> list[asyncpg.Record]:
+    ) -> list[dict]:
         """Fetch paginated articles sorted by publication date descending."""
         query = """
             SELECT arxiv_id, title, summary, authors, categories, published_at, updated_at
@@ -20,7 +20,8 @@ class ArticleRepository:
             LIMIT $2 OFFSET $3;
         """
         async with self._pool.acquire() as conn:
-            return await conn.fetch(query, category, limit, offset)
+            rows = await conn.fetch(query, category, limit, offset)
+            return [dict(r) for r in rows]
 
     async def count_articles(self, category: str | None = None) -> int:
         """Count articles matching the same filter used by list_articles."""
@@ -31,14 +32,15 @@ class ArticleRepository:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(query, category)
 
-    async def get_by_arxiv_id(self, arxiv_id: str) -> asyncpg.Record | None:
+    async def get_by_arxiv_id(self, arxiv_id: str) -> dict | None:
         query = """
             SELECT arxiv_id, title, summary, authors, categories, published_at, updated_at
             FROM articles
             WHERE arxiv_id = $1
         """
         async with self._pool.acquire() as conn:
-            return await conn.fetchrow(query, arxiv_id)
+            row = await conn.fetchrow(query, arxiv_id)
+            return dict(row) if row is not None else None
 
     async def upsert_article(
         self,
@@ -68,7 +70,7 @@ class ArticleRepository:
 
     async def search_articles(
         self, query: str, limit: int = 20, offset: int = 0
-    ) -> list[asyncpg.Record]:
+    ) -> list[dict]:
         sql = """
             SELECT
                 arxiv_id,
@@ -79,7 +81,8 @@ class ArticleRepository:
             LIMIT $2 OFFSET $3;
         """
         async with self._pool.acquire() as conn:
-            return await conn.fetch(sql, query, limit, offset)
+            rows = await conn.fetch(sql, query, limit, offset)
+            return [dict(r) for r in rows]
 
     async def count_search_results(self, query: str) -> int:
         """Count articles matching the same full-text query."""

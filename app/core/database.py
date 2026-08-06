@@ -15,6 +15,7 @@ async def create_db_pool() -> asyncpg.Pool:
         port=settings.db_port,
         min_size=2,
         max_size=10,
+        command_timeout=30
     )
 
 

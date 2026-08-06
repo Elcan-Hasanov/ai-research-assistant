@@ -18,7 +18,7 @@ class ArticleService:
         )
         total = await self._repository.count_articles(category=category)
 
-        items = [ArticleResponse(**dict(record)) for record in records]
+        items = [ArticleResponse(**record) for record in records]
 
         return PaginatedResponse[ArticleResponse](
             items=items,
@@ -33,7 +33,7 @@ class ArticleService:
         if record is None:
             return None
 
-        return ArticleResponse(**dict(record))
+        return ArticleResponse(**record)
 
     async def search_articles(
         self, query: str, limit: int, offset: int
