@@ -5,8 +5,8 @@ import asyncpg
 class ArticleRepository:
     """Database access layer for article operations."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
-        self._pool = pool
+    def __init__(self, db: asyncpg.Pool | asyncpg.Connection) -> None:
+        self._db = db
 
     async def list_articles(
         self, limit: int = 20, offset: int = 0, category: str | None = None
@@ -19,9 +19,8 @@ class ArticleRepository:
             ORDER BY published_at DESC
             LIMIT $2 OFFSET $3;
         """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query, category, limit, offset)
-            return [dict(r) for r in rows]
+        rows = await self._db.fetch(query, category, limit, offset)
+        return [dict(r) for r in rows]
 
     async def count_articles(self, category: str | None = None) -> int:
         """Count articles matching the same filter used by list_articles."""
@@ -29,8 +28,7 @@ class ArticleRepository:
             SELECT COUNT(*) FROM articles
             WHERE ($1::text IS NULL OR $1 = ANY(categories));
         """
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval(query, category)
+        return await self._db.fetchval(query, category)
 
     async def get_by_arxiv_id(self, arxiv_id: str) -> dict | None:
         query = """
@@ -38,9 +36,8 @@ class ArticleRepository:
             FROM articles
             WHERE arxiv_id = $1
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(query, arxiv_id)
-            return dict(row) if row is not None else None
+        row = await self._db.fetchrow(query, arxiv_id)
+        return dict(row) if row is not None else None
 
     async def upsert_article(
         self,
@@ -63,10 +60,9 @@ class ArticleRepository:
                 published_at = EXCLUDED.published_at,
                 updated_at = NOW();
         """
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                query, arxiv_id, title, summary, authors, categories, published_at
-            )
+        await self._db.execute(
+            query, arxiv_id, title, summary, authors, categories, published_at
+        )
 
     async def search_articles(
         self, query: str, limit: int = 20, offset: int = 0
@@ -80,9 +76,8 @@ class ArticleRepository:
             ORDER BY rank DESC
             LIMIT $2 OFFSET $3;
         """
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(sql, query, limit, offset)
-            return [dict(r) for r in rows]
+        rows = await self._db.fetch(sql, query, limit, offset)
+        return [dict(r) for r in rows]
 
     async def count_search_results(self, query: str) -> int:
         """Count articles matching the same full-text query."""
@@ -90,5 +85,4 @@ class ArticleRepository:
             SELECT COUNT(*) FROM articles
             WHERE search_vector @@ websearch_to_tsquery('english', $1);
         """
-        async with self._pool.acquire() as conn:
-            return await conn.fetchval(sql, query)
+        return await self._db.fetchval(sql, query)

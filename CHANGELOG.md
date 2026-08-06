@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local embedding inference via Sentence Transformers; model selected
   against measured criteria (output dimension, `max_seq_length`,
   license) rather than leaderboard rank
+- `article_embeddings` table: vector(384) column, composite PK
+  (`arxiv_id`, `model_name`), `content_hash` for staleness detection
+- pgvector type codec registration on connection pool init (API and scripts)
+- Startup-time verification that the loaded model's output dimension
+  matches the configured schema dimension
+- `EmbeddingModel.encode_documents()` / `encode_query()`, routed through
+  sentence-transformers' prompt-aware encoding methods
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`

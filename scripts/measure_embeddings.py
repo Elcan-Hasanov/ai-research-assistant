@@ -4,10 +4,12 @@ import logging
 import math
 import statistics
 
-import asyncpg
-
-from app.core.config import get_settings
-from app.core.embedding import EmbeddingModel, create_embedding_model
+from app.core.database import create_script_pool
+from app.core.embedding import (
+    EmbeddingModel,
+    build_embedding_text,
+    create_embedding_model,
+)
 from app.repositories.article_repository import ArticleRepository
 
 logging.basicConfig(
@@ -20,10 +22,6 @@ logger = logging.getLogger(__name__)
 SAMPLE_TEXT_LIMIT = 10_000
 
 
-def build_embedding_text(title: str, summary: str | None) -> str:
-    return f"{title}\n\n{summary or ''}".strip()
-
-
 def percentile(sorted_values: list[int], p: float) -> int:
     if not sorted_values:
         return 0
@@ -32,10 +30,7 @@ def percentile(sorted_values: list[int], p: float) -> int:
 
 
 async def fetch_texts() -> list[str]:
-    settings = get_settings()
-    pool = await asyncpg.create_pool(
-        dsn=settings.database_url, min_size=1, max_size=2
-    )
+    pool = await create_script_pool(min_size=1, max_size=2)
     try:
         repo = ArticleRepository(pool)
         records = await repo.list_articles(limit=SAMPLE_TEXT_LIMIT, offset=0)
@@ -86,7 +81,7 @@ def report_token_distribution(model: EmbeddingModel, texts: list[str]) -> None:
 
 def report_normalization(model: EmbeddingModel, texts: list[str]) -> None:
     sample = texts[:16]
-    raw_vectors = model.encode(sample, normalize=False)
+    raw_vectors = model.encode_documents(sample, normalize=False)
     norms = [math.sqrt(sum(value * value for value in vec)) for vec in raw_vectors]
 
     print("\n" + "=" * 62)

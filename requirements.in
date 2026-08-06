@@ -1,9 +1,6 @@
 # Direct dependencies only. requirements.txt is the frozen lockfile.
-# Regenerate:  pip freeze > requirements.txt
-# NOTE: manually add these two lines to the TOP of requirements.txt after regenerating
-# (pip freeze does not write them):
-#   --index-url https://pypi.org/simple
-#   --extra-index-url https://download.pytorch.org/whl/cpu
+# Regenerate: uv pip compile requirements.in -o requirements.txt
+
 fastapi
 uvicorn
 asyncpg
@@ -13,3 +10,4 @@ beautifulsoup4
 lxml
 requests
 sentence-transformers
+pgvector

@@ -1,19 +1,17 @@
-import logging
-import requests
 import asyncio
-import asyncpg
+import logging
 from datetime import datetime
 
-from app.core.config import get_settings 
-from app.scrapers.arxiv_client import ArxivClient
+import asyncpg
+import requests
+
+from app.core.database import create_script_pool
 from app.repositories.article_repository import ArticleRepository
-
-settings = get_settings()
-
+from app.scrapers.arxiv_client import ArxivClient
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
 
@@ -31,7 +29,7 @@ async def main():
     pool = None
 
     try:
-        pool = await asyncpg.create_pool(dsn=settings.database_url)
+        pool = await create_script_pool()
         db = ArticleRepository(pool)
 
         soup = client.fetch_raw_data(arxiv_url)

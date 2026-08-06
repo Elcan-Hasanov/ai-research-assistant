@@ -31,21 +31,19 @@ class EmbeddingModel:
         return len(
             self._model.tokenizer(
                 text,
-                # NOTE: Disable truncation to measure the actual token count of the raw text
-                # and detect limit exceedance for context loss evaluation.
                 truncation=False,
                 verbose=False,
             )["input_ids"]
         )
 
-    def encode(
+    def encode_documents(
         self,
         texts: list[str],
         batch_size: int = 32,
         normalize: bool = True,
     ) -> list[list[float]]:
-        """Encodes a list of texts into vector embeddings using batch processing."""
-        embeddings = self._model.encode(
+        """Encodes a list of article documents into vector embeddings using batch processing."""
+        embeddings = self._model.encode_document(
             texts,
             batch_size=batch_size,
             normalize_embeddings=normalize,
@@ -53,6 +51,20 @@ class EmbeddingModel:
             show_progress_bar=False,
         )
         return embeddings.tolist()
+
+    def encode_query(
+        self,
+        text: str,
+        normalize: bool = True,
+    ) -> list[float]:
+        """Encodes a single search query string into a vector embedding."""
+        embedding = self._model.encode_query(
+            text,
+            normalize_embeddings=normalize,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return embedding.tolist()
 
 
 def create_embedding_model(model_name: str | None = None) -> EmbeddingModel:
@@ -70,3 +82,8 @@ def create_embedding_model(model_name: str | None = None) -> EmbeddingModel:
         wrapper.max_seq_length,
     )
     return wrapper
+
+
+def build_embedding_text(title: str, summary: str | None) -> str:
+    """Build standardized string representation of an article for embedding calculation."""
+    return f"{title}\n\n{summary or ''}".strip()
