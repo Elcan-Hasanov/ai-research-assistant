@@ -1,10 +1,18 @@
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    force=True,
+)
+
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, status
 
 from app.api.dependencies import get_db_pool
 from app.api.routers import articles
 from app.core.config import get_settings
-from app.core.database import lifespan
+from app.core.lifespan import lifespan
 from app.core.exceptions import register_exception_handlers
 
 settings = get_settings()

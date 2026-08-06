@@ -1,7 +1,9 @@
 from functools import lru_cache
+from urllib.parse import quote_plus
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from urllib.parse import quote_plus
+
 
 class Settings(BaseSettings):
     db_name: str
@@ -11,10 +13,14 @@ class Settings(BaseSettings):
     db_port: int = 5432
 
     app_name: str = "AI Research Assistant API"
-    app_version: str = "2.0.0"
+    app_version: str = "3.0.0-dev"
+
+    embedding_model_name: str = "BAAI/bge-small-en-v1.5"
+    embedding_device: str = "cpu"
 
     @property
     def database_url(self) -> str:
+        """Construct database connection DSN string."""
         user = quote_plus(self.db_user)
         password = quote_plus(self.db_password.get_secret_value())
         return f"postgresql://{user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}"

@@ -1,0 +1,11 @@
+# Direct dependencies only. requirements.txt is the frozen lockfile.
+# Regenerate:  pip freeze > requirements.txt
+fastapi
+uvicorn
+asyncpg
+pydantic
+pydantic-settings
+beautifulsoup4
+lxml
+requests
+sentence-transformers
