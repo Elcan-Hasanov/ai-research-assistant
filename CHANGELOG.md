@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- pgvector extension enabled on a minimal, volume-backed PostgreSQL
+  container; schema versioning via numbered migration files and an
+  async runner script
+- Common retrieval contract (`RetrievalResult`: document id, score,
+  method) shared across the Router → Service → Repository layers
+- Lexical search endpoint (`/articles/search`) using PostgreSQL native
+  full-text search (tsvector, GIN index, `ts_rank_cd`)
+- Local embedding inference via Sentence Transformers; model selected
+  against measured criteria (output dimension, `max_seq_length`,
+  license) rather than leaderboard rank
+
+### Changed
+- `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
+  only, enabling transactional writes; returns plain `dict` instead of
+  `asyncpg.Record` for testability
+- Standalone scripts now share a single connection pool factory
+  (`create_script_pool`)
+
+---
+
 ## [2.0.0] - 2026-07-29
 
 ### Added
