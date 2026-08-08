@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches the configured schema dimension
 - `EmbeddingModel.encode_documents()` / `encode_query()`, routed through
   sentence-transformers' prompt-aware encoding methods
+- Embedding backfill pipeline (`scripts/backfill_embeddings.py`): embeds
+  articles missing a vector and re-embeds ones whose `content_hash` no
+  longer matches the current `build_embedding_text()` output
+- `ArticleRepository.count_missing_embeddings()` / `fetch_missing_embeddings()`
+  / `fetch_existing_embeddings()` / `upsert_embeddings()` for the backfill
+  read/write paths
+- `compute_content_hash()`, computing the embedding text's SHA-256 for
+  staleness detection
+- `article_embeddings.updated_at`, distinguishing a freshly written
+  vector from a re-embedded one
+- `--dry-run` and `--only-missing` flags for previewing and scoping
+  backfill runs without writing
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
@@ -32,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `asyncpg.Record` for testability
 - Standalone scripts now share a single connection pool factory
   (`create_script_pool`)
+- `content_hash`-based staleness detection is now active (the column
+  was added earlier but unused until this pipeline)
+- `embedding_batch_size` moved from an implicit script constant to
+  `Settings`, shared across scripts
 
 ---
 
