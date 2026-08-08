@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from sentence_transformers import SentenceTransformer
@@ -87,3 +88,8 @@ def create_embedding_model(model_name: str | None = None) -> EmbeddingModel:
 def build_embedding_text(title: str, summary: str | None) -> str:
     """Build standardized string representation of an article for embedding calculation."""
     return f"{title}\n\n{summary or ''}".strip()
+
+
+def compute_content_hash(text: str) -> str:
+    """Compute the SHA-256 hex digest of embedding text, used to detect stale vectors."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

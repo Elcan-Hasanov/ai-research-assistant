@@ -86,3 +86,74 @@ class ArticleRepository:
             WHERE search_vector @@ websearch_to_tsquery('english', $1);
         """
         return await self._db.fetchval(sql, query)
+    async def fetch_missing_embeddings(self, model_name: str, limit: int) -> list[dict]:
+        """Phase 1 — Fetches articles that lack embedding records for the specified model.
+
+        Consuming query behavior: Once written, processed rows automatically exit this
+        candidate set in subsequent fetches. Do not use OFFSET.
+        """
+        query = """
+            SELECT a.arxiv_id, a.title, a.summary
+            FROM articles a
+            LEFT JOIN article_embeddings e
+                ON e.arxiv_id = a.arxiv_id AND e.model_name = $1
+            WHERE e.arxiv_id IS NULL
+            LIMIT $2;
+        """
+        rows = await self._db.fetch(query, model_name, limit)
+        return [dict(r) for r in rows]
+
+    async def fetch_existing_embeddings(
+        self, model_name: str, limit: int, offset: int
+    ) -> list[dict]:
+        """Phase 2 — Fetches existing article embedding records along with their stored hashes.
+
+        Non-consuming query behavior: Updated rows continue to satisfy the query condition
+        and remain in the dataset. Pagination via OFFSET is required.
+        """
+        query = """
+            SELECT a.arxiv_id, a.title, a.summary, e.content_hash AS stored_hash
+            FROM articles a
+            JOIN article_embeddings e
+                ON e.arxiv_id = a.arxiv_id AND e.model_name = $1
+            ORDER BY a.arxiv_id
+            LIMIT $2 OFFSET $3;
+        """
+        rows = await self._db.fetch(query, model_name, limit, offset)
+        return [dict(r) for r in rows]
+
+    async def upsert_embeddings(
+        self,
+        model_name: str,
+        rows: list[tuple[str, str, list[float]]],
+    ) -> None:
+        """Upserts a batch of embedding records. `rows` expects tuples of (arxiv_id, content_hash, embedding).
+
+        This method does not manage transaction boundaries; callers control transaction scoping
+        for atomic writes.
+        """
+        query = """
+            INSERT INTO article_embeddings (arxiv_id, model_name, content_hash, embedding, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (arxiv_id, model_name) DO UPDATE SET
+                content_hash = EXCLUDED.content_hash,
+                embedding = EXCLUDED.embedding,
+                updated_at = NOW();
+        """
+        await self._db.executemany(
+            query,
+            [(arxiv_id, model_name, content_hash, vector) for arxiv_id, content_hash, vector in rows],
+        )
+
+    async def count_missing_embeddings(
+        self, model_name: str
+    ) -> int:
+        """Returns the total number of articles missing embeddings for the target model."""
+        query = """
+            SELECT COUNT(*)
+            FROM articles a
+            LEFT JOIN article_embeddings e
+                ON e.arxiv_id = a.arxiv_id AND e.model_name = $1
+            WHERE e.arxiv_id IS NULL
+        """
+        return await self._db.fetchval(query, model_name)
