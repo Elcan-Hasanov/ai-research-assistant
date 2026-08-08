@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"
     embedding_device: str = "cpu"
     embedding_dimension: int = 384
+    embedding_batch_size: int = 32
 
     @property
     def database_url(self) -> str:

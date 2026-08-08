@@ -1,0 +1,2 @@
+ALTER TABLE article_embeddings
+    ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
