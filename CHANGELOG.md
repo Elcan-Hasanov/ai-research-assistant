@@ -37,6 +37,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vector from a re-embedded one
 - `--dry-run` and `--only-missing` flags for previewing and scoping
   backfill runs without writing
+- Semantic search endpoint (`/articles/semantic-search`) ranking articles by
+  pgvector cosine distance (`<=>`) against a target model's stored embeddings
+- `ArticleRepository.semantic_search()` / `count_embedded_articles()` for the
+  vector retrieval read path
+- `ArticleService.semantic_search()`: offloads query encoding to a worker
+  thread (`asyncio.to_thread`) to avoid blocking the event loop, converts
+  cosine distance to a similarity score (`score = 1 - distance`), and maps
+  results onto the shared `RetrievalResult` contract (`method="semantic"`)
+- `/health/ready` now also verifies the embedding model was loaded at startup
+- `scripts/measure_query_prefix.py`: measures whether BAAI's documented query
+  instruction prefix changes retrieval ranking for `encode_query()`
+- **Decision (measured):** no manual query prefix is applied. `encode_query()`
+  was confirmed to apply no prompt on its own (`model.prompts` empty,
+  verified against raw `encode()` output). Manually injecting BAAI's
+  instruction prefix showed mixed, weak impact on ranking (mean
+  overlap@10 = 0.73 across 10 queries, top-1 changed in 4/10) — one clear
+  quality signal out of ten sampled queries is not sufficient evidence to
+  add a permanent code path. Revisit with the larger query set in Step 12.
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
@@ -48,7 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was added earlier but unused until this pipeline)
 - `embedding_batch_size` moved from an implicit script constant to
   `Settings`, shared across scripts
-
+- `search_articles()` and `semantic_search()` both order by a deterministic
+  tie-break (`arxiv_id`) after the primary score/distance, preventing
+  duplicate or skipped rows across paginated requests when scores tie
+  
 ---
 
 ## [2.0.0] - 2026-07-29
