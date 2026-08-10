@@ -7,7 +7,7 @@ logging.basicConfig(
 )
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from app.api.dependencies import get_db_pool
 from app.api.routers import articles
@@ -35,14 +35,22 @@ async def health_check() -> dict:
 
 @app.get("/health/ready", tags=["System"])
 async def readiness_check(
+    request: Request,
     pool: asyncpg.Pool = Depends(get_db_pool),
 ) -> dict:
-    """It checks the database connection and whether the system is ready to use."""
+    """Readiness now covers both dependencies the retrieval paths require."""
     try:
         await pool.fetchval("SELECT 1")
-        return {"status": "ready"}
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection is not ready",
         )
+
+    if getattr(request.app.state, "embedding_model", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding model is not loaded",
+        )
+
+    return {"status": "ready"}

@@ -1,13 +1,15 @@
 from app.repositories.article_repository import ArticleRepository
 from app.schemas.article import ArticleResponse
 from app.schemas.retrieval import PaginatedResponse, RetrievalResult
-
+from app.core.embedding import EmbeddingModel
+import asyncio
 
 class ArticleService:
     """Orchestrates article retrieval and maps persistence records onto API contracts."""
 
-    def __init__(self, repository: ArticleRepository) -> None:
+    def __init__(self, repository: ArticleRepository, model: EmbeddingModel) -> None:
         self._repository = repository
+        self._model = model
 
     async def list_articles(
         self, limit: int, offset: int, category: str | None = None
@@ -52,6 +54,34 @@ class ArticleService:
                 method="lexical",
             )
             for record in records
+        ]
+
+        return PaginatedResponse[RetrievalResult](
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def semantic_search(
+        self, query: str, limit: int, offset: int
+    ) -> PaginatedResponse[RetrievalResult]:
+        
+        query_vector = await asyncio.to_thread(self._model.encode_query, query)
+
+        raw_results = await self._repository.semantic_search(
+            query_vector, self._model.model_name, limit, offset
+        )
+
+        total = await self._repository.count_embedded_articles(self._model.model_name)
+
+        items = [
+            RetrievalResult(
+                document_id=row["arxiv_id"],
+                score=1.0 - row["distance"],
+                method="semantic",
+            )
+            for row in raw_results
         ]
 
         return PaginatedResponse[RetrievalResult](

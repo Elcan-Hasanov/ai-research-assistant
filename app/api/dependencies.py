@@ -22,5 +22,6 @@ async def get_article_repository(
 
 async def get_article_service(
     repo: ArticleRepository = Depends(get_article_repository),
+    model: EmbeddingModel = Depends(get_embedding_model),
 ) -> ArticleService:
-    return ArticleService(repo)
+    return ArticleService(repo, model)
