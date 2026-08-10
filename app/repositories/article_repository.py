@@ -65,7 +65,10 @@ class ArticleRepository:
         )
 
     async def search_articles(
-        self, query: str, limit: int = 20, offset: int = 0
+        self, 
+        query: str, 
+        limit: int = 20, 
+        offset: int = 0,
     ) -> list[dict]:
         sql = """
             SELECT
@@ -73,7 +76,7 @@ class ArticleRepository:
                 ts_rank_cd(search_vector, websearch_to_tsquery('english', $1)) AS rank
             FROM articles
             WHERE search_vector @@ websearch_to_tsquery('english', $1)
-            ORDER BY rank DESC
+            ORDER BY rank DESC, arxiv_id
             LIMIT $2 OFFSET $3;
         """
         rows = await self._db.fetch(sql, query, limit, offset)
@@ -104,7 +107,10 @@ class ArticleRepository:
         return [dict(r) for r in rows]
 
     async def fetch_existing_embeddings(
-        self, model_name: str, limit: int, offset: int
+        self, 
+        model_name: str, 
+        limit: int, 
+        offset: int,
     ) -> list[dict]:
         """Phase 2 — Fetches existing article embedding records along with their stored hashes.
 
@@ -156,4 +162,35 @@ class ArticleRepository:
                 ON e.arxiv_id = a.arxiv_id AND e.model_name = $1
             WHERE e.arxiv_id IS NULL
         """
+        return await self._db.fetchval(query, model_name)
+
+    async def semantic_search(
+        self,
+        query_vector: list[float],
+        model_name: str,
+        limit: int,
+        offset: int,
+    ) -> list[dict]:
+
+        query = """
+            SELECT 
+                arxiv_id,
+                embedding <=> $1 AS distance
+            FROM article_embeddings
+            WHERE model_name = $2
+            ORDER BY distance ASC, arxiv_id
+            LIMIT $3 OFFSET $4;
+        """
+
+        rows = await self._db.fetch(query, query_vector, model_name, limit, offset)
+        return [dict(row) for row in rows]
+
+    async def count_embedded_articles(self, model_name: str) -> int:
+
+        query = """
+            SELECT COUNT(*)
+            FROM article_embeddings
+            WHERE model_name = $1
+        """
+
         return await self._db.fetchval(query, model_name)
