@@ -55,6 +55,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap@10 = 0.73 across 10 queries, top-1 changed in 4/10) — one clear
   quality signal out of ten sampled queries is not sufficient evidence to
   add a permanent code path. Revisit with the larger query set in Step 12.
+- HNSW index on `article_embeddings.embedding` (`vector_cosine_ops`,
+  `m=16`, `ef_construction=64`, explicitly pinned rather than left at
+  extension defaults, since the server image tag is mutable)
+- `hnsw_ef_search` setting in `Settings`, kept in sync with
+  `SearchParams.limit`'s ceiling (100) so the ANN candidate pool is never
+  narrower than the largest result count the API allows
+- `scripts/measure_ann_index.py`: characterises the HNSW index against
+  the exact NumPy ranking already established in
+  `measure_query_prefix.py` — reads server-side extension version and
+  index definition, verifies `EXPLAIN_TARGET_SQL` stays identical to
+  `ArticleRepository.semantic_search()`, plans the query under three
+  scan modes (`exact` / `default` / `forced`), and sweeps `ef_search`
+  for recall@k and latency
+- `ingest_arxiv.py` now paginates and accepts `--categories` /
+  `--target`; default categories expanded to `cs.AI`, `cs.CL`, `cs.LG`
+  (Step 12's query set — RLHF, PEFT, MoE, CoT — lives mostly outside
+  `cs.AI` alone). Cross-listed papers are handled for free by the
+  existing `upsert_article()` idempotency (`ON CONFLICT DO UPDATE`),
+  no additional code required
+- Corpus grown to ~5,000 articles, backfilled with existing embedding
+  pipeline unchanged (idempotent, missing-only by design since Step 9)
+- **Decision (measured):** at n=5,000 the planner does not select the
+  HNSW index under default cost settings — `EXPLAIN ANALYZE` shows
+  `Seq Scan` for both the exact and default-config plans (~8-13ms,
+  fully buffer-resident). Forcing `enable_seqscan = off` confirms the
+  index *is* usable (`Index Scan` executes, operator class correct);
+  the planner's choice is a cost decision, not a broken index. Recall
+  sweep across `ef_search ∈ {1,5,10,20,40,100}` returned 1.000 at every
+  setting, consistent with the index never being selected. This is not
+  a failed measurement — it's the expected outcome at this scale.
+  Revisit when corpus size grows enough for the planner's cost
+  estimate to flip (V7).
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
@@ -69,6 +101,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `search_articles()` and `semantic_search()` both order by a deterministic
   tie-break (`arxiv_id`) after the primary score/distance, preventing
   duplicate or skipped rows across paginated requests when scores tie
+
+### Fixed
+- `hnsw.ef_search` set via `set_config()` in the pool's
+  `_init_connection` hook did not persist — `SHOW hnsw.ef_search`
+  reported the server default (40) regardless of the configured value
+  (100), even after forcing pgvector's shared library to load first.
+  Root cause not fully isolated between two candidates (pgvector
+  library load timing vs. asyncpg pool connection-return behavior).
+  Fixed by moving the setting from connection scope to database scope:
+  `ALTER DATABASE ... SET hnsw.ef_search = 100` in a new migration,
+  applied once at the session's start regardless of how the connection
+  was opened. `_init_connection` simplified back to codec registration
+  only.
   
 ---
 

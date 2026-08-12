@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     embedding_dimension: int = 384
     embedding_batch_size: int = 32
 
+    # ANN index runtime tuning. Kept >= SearchParams.limit ceiling (100) so that
+    # the HNSW candidate pool is never narrower than the number of rows a caller
+    # can legally request. Nothing enforces that coupling — see 🎯 below.
+    hnsw_ef_search: int = 100
+
     @property
     def database_url(self) -> str:
         """Construct database connection DSN string."""
