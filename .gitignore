@@ -3,3 +3,4 @@
 __pycache__/
 *.pyc
 repomix-output.*
+evaluation/run_*.txt
