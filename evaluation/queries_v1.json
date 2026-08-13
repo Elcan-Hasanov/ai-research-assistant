@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "note": "Step 12 retrieval comparison set. Stratified by query type before any query was written, so the set measures the systems rather than the author's query habits. q09-q17 are anchored to three real corpus titles, each viewed from increasing lexical distance. Validated against the corpus snapshot recorded in evaluation/findings_step12.md.",
+  "types": [
+    "exact_term",
+    "acronym",
+    "named_entity",
+    "paraphrase",
+    "conceptual",
+    "out_of_corpus"
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "type": "exact_term",
+      "text": "retrieval augmented generation",
+      "note": "Canonical multi-word term. Every token is likely to appear literally."
+    },
+    {
+      "id": "q02",
+      "type": "exact_term",
+      "text": "knowledge distillation",
+      "note": "Two-token term; websearch_to_tsquery ANDs both stems."
+    },
+    {
+      "id": "q09",
+      "type": "exact_term",
+      "text": "KV cache eviction",
+      "note": "Taken verbatim from a known corpus title. Lexical should be near-perfect here; if it is not, the tsvector pipeline is the suspect, not the corpus."
+    },
+    {
+      "id": "q03",
+      "type": "acronym",
+      "text": "RLHF",
+      "note": "Single opaque token. Carries no surface meaning for an embedding model."
+    },
+    {
+      "id": "q04",
+      "type": "acronym",
+      "text": "LoRA",
+      "note": "Collides with an unrelated English word ('lora'/'flora' stems) and with LoRaWAN."
+    },
+    {
+      "id": "q05",
+      "type": "named_entity",
+      "text": "FlashAttention",
+      "note": "Concatenated proper name. Tokenizes differently on each side."
+    },
+    {
+      "id": "q10",
+      "type": "named_entity",
+      "text": "RestoreKV",
+      "note": "Appears in exactly one known corpus paper. The sharpest possible named-entity test: lexical should return that one paper; semantic has no surface signal to work with."
+    },
+    {
+      "id": "q11",
+      "type": "named_entity",
+      "text": "Qwen",
+      "note": "Model family name. Likely present across several papers, unlike q10's single-paper case."
+    },
+    {
+      "id": "q06",
+      "type": "paraphrase",
+      "text": "keeping language models from making up facts",
+      "note": "Describes hallucination without using the word 'hallucination'."
+    },
+    {
+      "id": "q12",
+      "type": "paraphrase",
+      "text": "teaching a model facts by writing them into its weights instead of looking them up at answer time",
+      "note": "Paraphrase of the closed-book QA / LoRA-internalisation paper. Shares zero content words with that title by construction."
+    },
+    {
+      "id": "q13",
+      "type": "paraphrase",
+      "text": "rewording a prompt so the model starts inventing things that were never said",
+      "note": "Paraphrase of the semantically-equivalent adversarial attack paper. Zero content-word overlap with its title."
+    },
+    {
+      "id": "q14",
+      "type": "paraphrase",
+      "text": "keeping long conversations in memory without the model slowing to a crawl",
+      "note": "Paraphrase of the KV cache paper. Zero content-word overlap with its title, in contrast with q09 which is taken verbatim from it."
+    },
+    {
+      "id": "q07",
+      "type": "conceptual",
+      "text": "running large models when GPU memory is limited",
+      "note": "States a problem, not a technique. Matching papers may share no vocabulary."
+    },
+    {
+      "id": "q15",
+      "type": "conceptual",
+      "text": "can a model answer questions without being shown the source text",
+      "note": "User-voice phrasing of closed-book QA. Contains no technical term at all."
+    },
+    {
+      "id": "q16",
+      "type": "conceptual",
+      "text": "why does changing how I phrase a question change whether the answer is true",
+      "note": "User-voice phrasing of prompt-sensitivity and hallucination. No technical term."
+    },
+    {
+      "id": "q17",
+      "type": "conceptual",
+      "text": "my model runs out of memory when the input gets long",
+      "note": "User-voice symptom report. The matching literature never phrases the problem this way."
+    },
+    {
+      "id": "q08",
+      "type": "out_of_corpus",
+      "text": "sourdough bread fermentation chemistry",
+      "note": "Control. Deliberately absent from cs.AI/cs.CL/cs.LG. Lexical must return zero; semantic cannot."
+    },
+    {
+      "id": "q18",
+      "type": "out_of_corpus",
+      "text": "medieval manuscript illumination pigments",
+      "note": "Second control, different domain. Two controls guard against one of them accidentally matching an ML paper that uses the vocabulary metaphorically."
+    }
+  ]
+}

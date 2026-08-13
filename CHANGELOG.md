@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap@10 = 0.73 across 10 queries, top-1 changed in 4/10) — one clear
   quality signal out of ten sampled queries is not sufficient evidence to
   add a permanent code path. Revisit with the larger query set in Step 12.
+- **Decision (re-measured, closed):** re-ran the frozen 10-query prefix
+  control set on the 5,000-document corpus (up from 100). Result unchanged
+  within rounding — mean overlap@10 = 0.730, top-1 changed 4/10, versus 0.73
+  and 4/10 on the original corpus. The 50x corpus growth produced no
+  meaningful shift. Per the pre-committed decision rule (overlap@10 ≥ 0.65
+  and top-1 changed ≤ 5/10), this question is now closed permanently — no
+  manual query prefix will be added.
 - HNSW index on `article_embeddings.embedding` (`vector_cosine_ops`,
   `m=16`, `ef_construction=64`, explicitly pinned rather than left at
   extension defaults, since the server image tag is mutable)
@@ -87,6 +94,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a failed measurement — it's the expected outcome at this scale.
   Revisit when corpus size grows enough for the planner's cost
   estimate to flip (V7).
+- `ArticleRepository.get_by_ids()`: batch document hydration for retrieval
+  results. Retrieval returns ids and scores; the documents themselves are
+  fetched separately from the source-of-truth table. Row order is
+  deliberately unspecified — ranking belongs to the caller that produced it
+- `evaluation/queries_v1.json`: 18-query retrieval evaluation set, stratified
+  by query type (exact_term, acronym, named_entity, paraphrase, conceptual,
+  out_of_corpus) before any query was written, so the set measures the
+  systems rather than the author's query habits
+- `scripts/compare_retrieval.py`: runs the evaluation set through both
+  retrieval paths via `ArticleService`, hydrates the union of both result
+  sets in one round-trip, and prints the two rankings with shared documents
+  marked
+- `evaluation/findings_step12.md`: qualitative comparison of lexical and
+  semantic retrieval. Relevance criterion committed before inspection;
+  pooling bias and sample size recorded as explicit limitations. This is the
+  first version of the V6 benchmark dataset
+
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
@@ -114,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied once at the session's start regardless of how the connection
   was opened. `_init_connection` simplified back to codec registration
   only.
-  
+
 ---
 
 ## [2.0.0] - 2026-07-29

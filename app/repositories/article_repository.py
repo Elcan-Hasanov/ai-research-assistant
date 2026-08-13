@@ -194,3 +194,25 @@ class ArticleRepository:
         """
 
         return await self._db.fetchval(query, model_name)
+
+    async def get_by_ids(self, arxiv_ids: list[str]) -> list[dict]:
+            """Fetch articles for a set of ids in a single round-trip.
+
+            Row order is UNSPECIFIED and does not follow `arxiv_ids`. Do not
+            render these rows as a ranked list. Build a lookup from the result
+            and re-order using the ranking you already hold.
+
+            Ids with no matching row are omitted; the caller decides whether
+            that is an error.
+            """
+            if not arxiv_ids:
+                return []
+
+            query = """
+            SELECT arxiv_id, title
+            FROM articles
+            WHERE arxiv_id = ANY($1);
+            """
+
+            rows = await self._db.fetch(query, arxiv_ids)
+            return [dict(row) for row in rows]
