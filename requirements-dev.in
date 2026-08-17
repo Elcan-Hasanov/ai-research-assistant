@@ -1,0 +1,8 @@
+# Development and test dependencies only.
+# These are NEVER installed into a production image.
+# Regenerate: uv pip compile requirements-dev.in -o requirements-dev.txt
+
+-c requirements.txt
+
+pytest
+pytest-asyncio>=0.24

@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [3.0.0] - 2026-08-17
+
 ### Added
+
 - pgvector extension enabled on a minimal, volume-backed PostgreSQL
   container; schema versioning via numbered migration files and an
   async runner script
@@ -110,7 +115,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantic retrieval. Relevance criterion committed before inspection;
   pooling bias and sample size recorded as explicit limitations. This is the
   first version of the V6 benchmark dataset
-
+- Test suite (`tests/`): 35 tests across schema validation, the
+  `distance → score` conversion, vector dimension consistency, and
+  repository query correctness. Scope is deliberately narrow — not
+  coverage-driven. The targets are surfaces where a wrong answer is
+  *silent*: a swapped `ORDER BY` direction, a dropped `WHERE`, a
+  transposed `LIMIT`/`OFFSET` pair. Paths that fail loudly (schema
+  constraints, invalid SQL) and paths whose output a human already
+  reads (lab scripts) are excluded
+- Per-test transactional isolation (`tests/conftest.py`): each test runs
+  inside an open transaction that is always rolled back, including when
+  the test raises. Cleanup is a property of the transaction rather than
+  code at the end of the test, so it cannot be skipped by an early
+  failure. This is only possible because `ArticleRepository` accepts a
+  `Connection` as well as a `Pool` — the test's transaction and the
+  repository's queries must share one connection, or uncommitted rows
+  stay invisible to the reader
+- Tests run against a separate database (`DB_NAME` overridden at conftest
+  import, `get_settings.cache_clear()` applied). Application code carries
+  no test awareness. A second guard is behavioural rather than
+  name-based: if the target database holds more than
+  `MAX_ROWS_IN_TEST_DATABASE` articles it is a working corpus, and the
+  session refuses to start — a name comparison would have been defeated
+  by a stale `DB_NAME` left in the shell
+- `FakeEmbeddingModel`: a hand-written stand-in exposing exactly the
+  surface the service uses (`encode_query`, `model_name`). Deterministic
+  by construction (same text → same unit vector) but never semantic;
+  ranking quality is V6's question, not this layer's. Written as a class
+  rather than `MagicMock` so that calling a method the real class does
+  not have raises instead of silently succeeding
+- `requirements-dev.in` / `requirements-dev.txt`: test dependencies kept
+  out of the production manifest, constrained (`-c requirements.txt`) so
+  the two resolutions cannot disagree on a shared transitive dependency
+- `pyproject.toml` with `[tool.pytest.ini_options]` only. `asyncio_mode`
+  must be set or async tests are skipped without failing the suite;
+  `--strict-config` turns an unrecognised option into an error so that
+  misconfiguration cannot itself be silent. Package metadata deliberately
+  omitted — that is a packaging decision, not a test one
+- **Decision (calibrated):** every test was verified by mutation — the
+  SQL or service decision it claims to protect was deliberately broken
+  and the test confirmed to fail. Weakening (`WHERE ... OR TRUE`) rather
+  than deletion, since deleting a clause leaves an unused bind parameter
+  and the query stops being valid SQL, which proves nothing about the
+  test. Four repository decisions and three service decisions were
+  calibrated this way. A green suite is evidence only after this step
+- **Decision (revised):** index-usage verification (`Index Scan using
+  articles_pkey`, observed on the 5,000-row corpus in Step 12) was not
+  carried into a test. Query plans are a function of data volume; on a
+  five-row test table the planner correctly chooses `Seq Scan`, so the
+  assertion would fail for the right reason. Plan assertions belong to a
+  benchmark suite against realistic volumes (V6/V7). The remaining
+  `get_by_ids` cases — empty input, unknown ids, repeated ids, absence of
+  an order guarantee — are covered
 
 ### Changed
 - `ArticleRepository` now accepts `Pool | Connection` instead of `Pool`
@@ -125,7 +181,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `search_articles()` and `semantic_search()` both order by a deterministic
   tie-break (`arxiv_id`) after the primary score/distance, preventing
   duplicate or skipped rows across paginated requests when scores tie
-
+- Test database schema is applied manually (`DB_NAME=... python -m
+  scripts.migrate`); the suite asserts the schema exists rather than
+  creating it, since `migrate.py` is still CWD-dependent. Automating
+  this is blocked on that fix (V7)
+  
 ### Fixed
 - `hnsw.ef_search` set via `set_config()` in the pool's
   `_init_connection` hook did not persist — `SHOW hnsw.ef_search`
