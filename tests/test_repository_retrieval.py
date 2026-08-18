@@ -3,11 +3,14 @@ import pytest
 
 from app.core.config import get_settings
 from tests.factories import insert_article, insert_embedding
+
+# Run these tests against a real PostgreSQL database with the required extensions.
 pytestmark = pytest.mark.db
 
 
 @pytest.fixture
 async def seed_search_articles(db_conn):
+    """Create a controlled corpus for testing lexical search behavior."""
     await insert_article(
         db_conn,
         arxiv_id="2601.00001",
@@ -34,10 +37,10 @@ async def seed_search_articles(db_conn):
     }
 
 
-# 1. Yalnızca Filtre (WHERE) Testi
 async def test_search_articles_filters_non_matching(
     repository, seed_search_articles
 ):
+    """Ensure articles without a lexical match are excluded from results."""
     ids = seed_search_articles
 
     results = await repository.search_articles(
@@ -50,10 +53,10 @@ async def test_search_articles_filters_non_matching(
     assert ids["no_rel"] not in returned_ids
 
 
-# 2. Yalnızca Sıralama (ORDER BY) Testi
 async def test_search_articles_orders_by_relevance(
     repository, seed_search_articles
 ):
+    """Ensure lexical search results are ordered by relevance."""
     ids = seed_search_articles
 
     results = await repository.search_articles(
@@ -64,10 +67,10 @@ async def test_search_articles_orders_by_relevance(
     assert results[1]["arxiv_id"] == ids["low_rel"]
 
 
-# 3. Tip ve Kolon Sözleşmesi Testi
 async def test_search_articles_matches_contract(
     repository, seed_search_articles
 ):
+    """Ensure lexical search returns the fields expected by upstream services."""
     results = await repository.search_articles(
         query="Quantum", limit=1, offset=0
     )
@@ -76,19 +79,19 @@ async def test_search_articles_matches_contract(
     assert set(results[0].keys()) == {"arxiv_id", "rank"}
 
 
-# 4. Sayım Testi - Eşleşen Durum
 async def test_count_search_results_returns_matching_count(
     repository, seed_search_articles
 ):
+    """Ensure the result count matches the number of searchable records."""
     count = await repository.count_search_results(query="Quantum")
 
     assert count == 2
 
 
-# 5. Sayım Testi - Eşleşmeyen Durum
 async def test_count_search_results_returns_zero_when_no_match(
     repository, seed_search_articles
 ):
+    """Ensure queries with no matches return a zero count."""
     count = await repository.count_search_results(query="NonExistentTerm")
 
     assert count == 0
@@ -100,14 +103,14 @@ MODEL_B = "test/model-b"
 
 
 def _basis_vector(index: int) -> list[float]:
-    """Unit vector along one axis. Two different axes are always orthogonal."""
+    """Create a unit vector along a single dimension."""
     vector = [0.0] * DIMENSION
     vector[index] = 1.0
     return vector
 
 
 def _diagonal_vector(first: int, second: int) -> list[float]:
-    """Unit vector halfway between two axes. Cosine to either axis is 1/sqrt(2)."""
+    """Create a unit vector equally distributed across two dimensions."""
     vector = [0.0] * DIMENSION
     component = 1.0 / math.sqrt(2.0)
     vector[first] = component
@@ -117,13 +120,15 @@ def _diagonal_vector(first: int, second: int) -> list[float]:
 
 @pytest.fixture
 async def seed_semantic_search(db_conn):
-    """Four rows whose distances to the query vector are fixed by construction.
+    """Create vectors with known cosine distances for deterministic ordering tests.
 
-    Query vector is e0. Cosine distance is 1 - cosine_similarity:
-        nearest      e0                -> 0.0
-        middle       (e0 + e1)/sqrt(2) -> ~0.2929
-        farthest     e1                -> 1.0
-        other_model  e0                -> 0.0, but stored under MODEL_B
+    The query vector is e0. This gives predictable distances:
+        nearest       e0                -> 0.0
+        middle        (e0 + e1)/sqrt(2) -> ~0.2929
+        farthest      e1                -> 1.0
+
+    The fourth vector uses the same embedding as the nearest result but
+    belongs to a different model, allowing model isolation to be tested.
     """
     rows = [
         ("2601.00001", MODEL_A, _basis_vector(0)),
@@ -152,10 +157,11 @@ async def seed_semantic_search(db_conn):
 async def test_semantic_search_orders_by_distance(
     repository, seed_semantic_search
 ):
+    """Ensure semantic search returns results ordered by cosine distance."""
     ids = seed_semantic_search
 
     results = await repository.semantic_search(
-        query_vector=ids["query_vector"], model_name=MODEL_A,  limit=10, offset=0,
+        query_vector=ids["query_vector"], model_name=MODEL_A, limit=10, offset=0,
     )
 
     assert results[0]["arxiv_id"] == ids["nearest"]
@@ -166,6 +172,7 @@ async def test_semantic_search_orders_by_distance(
 async def test_semantic_search_excludes_other_models(
     repository, seed_semantic_search
 ):
+    """Ensure embeddings from other models do not affect search results."""
     ids = seed_semantic_search
 
     results = await repository.semantic_search(
@@ -184,8 +191,9 @@ async def test_semantic_search_excludes_other_models(
 async def test_count_embedded_articles_counts_only_the_named_model(
     repository, seed_semantic_search
 ):
+    """Ensure embedding counts are scoped to the requested model."""
     ids = seed_semantic_search
-    
+
     count = await repository.count_embedded_articles(model_name=ids["model"])
 
     assert count == 3
@@ -194,9 +202,12 @@ async def test_count_embedded_articles_counts_only_the_named_model(
 async def test_count_embedded_articles_counts_the_second_model(
     repository, seed_semantic_search
 ):
+    """Ensure embeddings are counted independently for different models."""
     ids = seed_semantic_search
-    
-    count = await repository.count_embedded_articles(model_name=ids["other_model_name"])
+
+    count = await repository.count_embedded_articles(
+        model_name=ids["other_model_name"]
+    )
 
     assert count == 1
 
@@ -204,8 +215,9 @@ async def test_count_embedded_articles_counts_the_second_model(
 async def test_semantic_search_returns_arxiv_id_and_distance(
     repository, seed_semantic_search
 ):
+    """Ensure semantic search returns the expected result fields."""
     ids = seed_semantic_search
-    
+
     results = await repository.semantic_search(
         query_vector=ids["query_vector"], model_name=ids["model"], limit=10, offset=0,
     )

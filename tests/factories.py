@@ -1,14 +1,16 @@
-"""Helpers that put rows into the test database.
+"""Helpers for inserting rows into the test database.
 
-Every write here happens inside the caller's open transaction, so nothing
-survives the test.
+All writes occur within the caller's active transaction and are rolled back
+when the test finishes.
 """
 
 from datetime import datetime, timezone
 
 import asyncpg
 
+
 DEFAULT_PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
 FAKE_CONTENT_HASH = "0" * 64
 
 

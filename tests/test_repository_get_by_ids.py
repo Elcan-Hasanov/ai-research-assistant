@@ -2,6 +2,7 @@ import pytest
 
 from tests.factories import insert_article
 
+
 pytestmark = pytest.mark.db
 
 IDS = ["2601.00001", "2601.00002", "2601.00003", "2601.00004", "2601.00005"]
@@ -22,7 +23,9 @@ async def test_unknown_ids_are_silently_omitted(repository, seeded):
     assert await repository.get_by_ids(["9999.99999", "9999.99998"]) == []
 
 
-async def test_mixture_of_known_and_unknown_returns_only_the_known(repository, seeded):
+async def test_mixture_of_known_and_unknown_returns_only_the_known(
+    repository, seeded
+):
     rows = await repository.get_by_ids([IDS[0], "9999.99999"])
 
     assert [row["arxiv_id"] for row in rows] == [IDS[0]]
@@ -35,13 +38,13 @@ async def test_repeated_ids_produce_one_row_each(repository, seeded):
     assert rows[0]["arxiv_id"] == IDS[0]
 
 
-async def test_result_is_a_set_of_rows_and_carries_no_order_guarantee(repository, seeded):
-    """get_by_ids does NOT promise to follow the order of its argument.
+async def test_result_is_a_set_of_rows_and_carries_no_order_guarantee(
+    repository, seeded
+):
+    """Ensure callers do not rely on input order being preserved.
 
-    Deliberately asserted on sets. The method has no ORDER BY, so row order is
-    whatever the chosen execution plan happens to produce. Asserting on order
-    would pass today and break the day the planner picks a different plan --
-    and the failure would be in this test, not in the code.
+    The repository query has no ORDER BY, so result order is not part of the
+    method's contract.
     """
     forward = await repository.get_by_ids(IDS)
     backward = await repository.get_by_ids(list(reversed(IDS)))

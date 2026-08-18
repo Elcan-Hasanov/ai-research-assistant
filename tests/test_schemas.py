@@ -47,10 +47,10 @@ def test_article_response_normalises_categories(raw, expected):
 
 
 def test_article_response_absorbs_the_authors_categories_asymmetry():
-    """authors is TEXT, categories is TEXT[] in the schema (open finding O2).
+    """Ensure validators handle both PostgreSQL TEXT and TEXT[] representations.
 
-    The same validator has to swallow both shapes. This test is the executable
-    record of that asymmetry; delete it when O2 is resolved in V5.
+    Authors are stored as TEXT while categories are stored as TEXT[]. This
+    test documents the intentional normalization of both input shapes.
     """
     article = ArticleResponse(
         arxiv_id="2601.00001",
@@ -78,7 +78,7 @@ def test_paginated_response_validates_items_against_its_type_parameter():
 def test_paginated_response_rejects_items_that_do_not_match():
     with pytest.raises(ValidationError):
         PaginatedResponse[RetrievalResult](
-            items=[{"document_id": "2601.00001"}],  # score and method missing
+            items=[{"document_id": "2601.00001"}],
             total=1,
             limit=20,
             offset=0,

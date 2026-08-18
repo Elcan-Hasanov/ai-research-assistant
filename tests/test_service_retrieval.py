@@ -3,6 +3,7 @@ import pytest
 from app.services.article_service import ArticleService
 from tests.factories import insert_article, insert_embedding
 
+
 pytestmark = pytest.mark.db
 
 QUERY_TEXT = "vector search over scientific abstracts"
@@ -11,12 +12,16 @@ OTHER_TEXT = "an unrelated sentence used only to build a third vector"
 
 @pytest.fixture
 def service(repository, fake_model) -> ArticleService:
-    """Real service, wired to repository and fake_model."""
     return ArticleService(repository, fake_model)
 
 
 @pytest.fixture
 async def seed_service_search(db_conn, fake_model):
+    """Create vectors with known similarity scores for deterministic tests.
+
+    The identical vector should produce a cosine similarity of 1, while its
+    negation should produce -1. A third vector provides an unrelated result.
+    """
     query_vector = fake_model.encode_query(QUERY_TEXT)
     opposite_vector = [-value for value in query_vector]
     third_vector = fake_model.encode_query(OTHER_TEXT)

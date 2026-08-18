@@ -57,7 +57,7 @@ D10's requirement (one term, no AND-of-multiple-stems ambiguity):
 | FlashAttention | 4 | present, very sparse |
 | RestoreKV | 1 | present, single paper (expected — proper name) |
 
-**Adım 10's open problem — "parameter efficient fine tuning has no match in
+**Step 10's open problem — "parameter efficient fine tuning has no match in
 the corpus" — resolved / not resolved:**
 
 **Partially resolved.** The literal 4-word phrase `"parameter efficient fine
