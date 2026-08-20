@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `anthropic` SDK as a direct dependency; `requirements.txt` regenerated
+  from `requirements.in`
+- LLM provider settings in `Settings`: `llm_api_key` (`SecretStr`, no
+  default — a missing credential is a configuration error and fails at
+  startup), `llm_model`, `llm_timeout_seconds`, and `llm_base_url`
+- `scripts/probe_llm.py`: one-shot discovery probe for the LLM provider.
+  Reports the SDK's default timeout and retry policy, dumps a raw
+  response object, and forces a `max_tokens` truncation to observe the
+  difference between a successful HTTP response and a complete
+  generation. Not a measurement script — no decision rule is written and
+  no threshold is derived from a single sample
+- `.env.example` extended with the four `LLM_*` keys (names only, no values)
+
+### Changed
+
+- `app_version` advanced to `4.0.0-dev`; the `.env` template in the README
+  was carrying `3.0.0` and has been brought in sync. A `Settings` default
+  is only a default — an `.env` file that still sets the old value silently
+  overrides it, which is why all three (config, `.env.example`, README)
+  are updated together
+- README restructured: table of contents removed (GitHub generates one),
+  the per-file directory tree reduced to top-level directories, and the
+  `Features (v3.0.0)` section dropped. The per-file tree required an edit
+  on every added migration or test, and the feature list restated what
+  this changelog already records. Design rationale that is not derivable
+  from the code — the retrieval contract, the testing scope decision, the
+  evaluation findings — was kept
+
+### Decisions
+
+- **Provider transport (measured, revisited):** the original choice was a
+  direct connection to `api.anthropic.com`, with aggregators rejected on
+  the grounds that two stacked abstraction layers make it impossible to
+  tell whose behaviour is being observed. That decision was reopened
+  against its own written trigger — a real access barrier — when the
+  provider console proved closed to new accounts. Requests now route
+  through an Anthropic-compatible gateway via `llm_base_url`, using
+  `auth_token` (Bearer) rather than `api_key` (`x-api-key`). The trigger
+  to revisit is direct provider access becoming available; `llm_base_url`
+  defaults to `None`, so returning to the direct path is a `.env` change,
+  not a code change
+- **Gateway model identifiers are not provider-native.** The compatibility
+  endpoint is wire-compatible on request and response shape but resolves
+  model names against its own catalogue: the provider-native id
+  (`claude-haiku-4-5-20251001`) returns `404`, and the gateway form
+  (`anthropic/claude-haiku-4.5`) is required. Because model choice lives
+  in configuration rather than in code, this was a one-line `.env` change
+- **Gateway `usage` is richer than the native contract and will not be
+  trusted.** Responses through the gateway carry `cost`, `cost_details`,
+  `provider`, and `speed` alongside the two fields the provider's own API
+  returns. Those extra fields disappear on the direct path, so the usage
+  accounting in Step 9 will compute cost from `input_tokens` /
+  `output_tokens` against our own price model rather than reading a
+  precomputed figure
+- **SDK defaults confirmed against documentation, not inferred from one
+  run.** Observed `max_retries=2` and a 600-second default timeout match
+  the published SDK behaviour. The agreement matters: a single
+  observation through a gateway could have reflected an overridden value,
+  and Step 8's retry budget depends on knowing which of the two is true
+
 ---
 
 ## [3.0.0] - 2026-08-17

@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     # can legally request. Nothing enforces that coupling — see 🎯 below.
     hnsw_ef_search: int = 100
 
+    # --- LLM provider ---------------------------------------------------
+    # Only values that change with the deployment environment live here.
+    # max_tokens and temperature are call-site arguments, not config: they
+    # vary by task, not by environment.
+    llm_api_key: SecretStr
+    llm_model: str = "claude-haiku-4-5-20251001"
+    llm_timeout_seconds: float = 30.0
+    llm_base_url: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

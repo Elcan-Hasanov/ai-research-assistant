@@ -11,3 +11,4 @@ lxml
 requests
 sentence-transformers
 pgvector
+anthropic
