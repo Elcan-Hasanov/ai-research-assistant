@@ -15,6 +15,7 @@ import pytest
 from app.core.config import get_settings
 from app.core.database import create_script_pool, get_standalone_db_connection
 from app.repositories.article_repository import ArticleRepository
+from app.core.llm import CompletionStop, LLMCompletion
 
 
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "arxiv_test")
@@ -138,3 +139,32 @@ class FakeEmbeddingModel:
 @pytest.fixture
 def fake_model() -> FakeEmbeddingModel:
     return FakeEmbeddingModel()
+
+
+class FakeLLMClient:
+    """Fake LLM client for testing without network calls."""
+
+    def __init__(self, response: LLMCompletion | None = None) -> None:
+        self._response = response or LLMCompletion(
+            text="Fake LLM response",
+            stop=CompletionStop.COMPLETED,
+            input_tokens=10,
+            output_tokens=5,
+            model="fake/test-llm",
+        )
+
+    async def complete(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        model: str | None = None,
+        system: str | None = None,
+        temperature: float | None = None,
+    ) -> LLMCompletion:
+        return self._response
+
+
+@pytest.fixture
+def fake_llm_client() -> FakeLLMClient:
+    return FakeLLMClient()

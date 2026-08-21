@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation. Not a measurement script — no decision rule is written and
   no threshold is derived from a single sample
 - `.env.example` extended with the four `LLM_*` keys (names only, no values)
+- `app/core/llm.py`: the single module in the application permitted to
+  import the provider SDK. Holds `LLMClient` (one `complete()` call, no
+  loop), `LLMCompletion` (the project's own return contract),
+  `CompletionStop`, `LLMError`, the `to_completion` translation
+  function, and the `create_llm_client` factory
+- `FakeLLMClient` in `tests/conftest.py`: hand-written, duck-typed
+  stand-in that returns a canned `LLMCompletion`. Second test double in
+  the project after `FakeEmbeddingModel`, and the seam every generation
+  test from the service layer onward will depend on
+- `tests/test_llm_client.py`: five translation tests built from a real
+  captured response, covering the normal case, truncation, multiple text
+  blocks, non-text blocks, and an unrecognised stop reason. No network,
+  no database, no marker
+
 
 ### Changed
 
@@ -68,7 +82,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the published SDK behaviour. The agreement matters: a single
   observation through a gateway could have reflected an overridden value,
   and Step 8's retry budget depends on knowing which of the two is true
-
+- **No SDK type crosses the boundary.** Five fields leave this module:
+  text, stop, `input_tokens`, `output_tokens`, and model. The gateway's
+  extra fields (`cost`, `provider`, `speed`, `service_tier`) are
+  deliberately dropped — they vanish on the direct path, so code reading
+  them would break silently the day direct access is restored. The
+  response `id` is also excluded; its format differs between the two
+  paths, and it gains a consumer only if Step 9's correlation work needs
+  a provider-side identifier. No `ABC` or `Protocol` is introduced: with
+  a single implementation, an interface can only be a copy of that
+  implementation's signature. Trigger: a second provider actually being
+  connected
+- **The SDK's own retry policy is switched off (`max_retries=0`).** Left
+  at its default of 2, it would multiply with the retry budget added in
+  Step 8 rather than add to it — a three-attempt budget becoming nine
+  billed calls. The failure would surface in Step 8, in a file that does
+  not mention retries, which is why it is closed here
+- **The error type carries data, not just a message.** `LLMError` holds
+  the provider's status code and the provider exception's *type name* as
+  a string. Without them, Step 7's taxonomy would have to either import
+  the SDK to catch its exception classes — defeating the boundary — or
+  parse error text. The message itself is a fixed string: SDK errors can
+  attach the request body, and that body will hold prompts and, later,
+  retrieved context. `getattr` is used for the status code because
+  connection and timeout errors do not carry one
+- **Stop reasons are mapped into this project's vocabulary, with a
+  fallback.** The provider's strings are confined to a lookup table and
+  an unrecognised value resolves to `UNKNOWN` instead of raising — a
+  unilateral addition on the provider's side should not break working
+  code. `stop_sequence` is folded into `COMPLETED` because no stop
+  sequence is configured; trigger to split it: one actually being passed
+- **The model identifier is read from the response, not from the
+  request.** The gateway resolves model names against its own catalogue,
+  so the configured value and the value actually used need not match.
+  Step 9 prices what was used, not what was asked for
+- **Nothing is wired into the application yet.** The client is not placed
+  on `app.state` and no dependency accessor exists, because no consumer
+  does. Wiring arrives in Step 6 alongside the endpoint that needs it.
+  For the same reason `FakeLLMClient` has no error mode and records no
+  calls; both are added when a test requires them
+- **Translation is a module-level function rather than a method**, so it
+  can be exercised without constructing a client or reaching the
+  network. Testing the full client path through a mock HTTP transport
+  was rejected: it would bind the tests to wire JSON while the client
+  has no behaviour beyond one call and a translation. Trigger: the
+  client acquiring behaviour beyond that
 ---
 
 ## [3.0.0] - 2026-08-17
