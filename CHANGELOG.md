@@ -34,7 +34,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured response, covering the normal case, truncation, multiple text
   blocks, non-text blocks, and an unrecognised stop reason. No network,
   no database, no marker
-
+- `jinja2` as a direct dependency. It was already present in the lockfile
+  as a transitive dependency of `torch`; relying on that would mean the
+  prompt layer breaks at import time the day the embedding stack is
+  removed from the image
+- `app/prompts/`: prompt content moved out of code and onto disk as
+  versioned `.txt` files. A leaf package — it imports nothing else from
+  this application
+- `app/prompts/registry.py`: loads every template in a directory at import
+  time and renders one on demand. Holds `PromptTemplate` (name, version,
+  system, user, declared variables), `RenderedPrompt` (exactly the two
+  pieces `LLMClient.complete()` accepts), `PromptError` with
+  `PromptLoadError` / `PromptRenderError`, and the `load_templates` /
+  `render_template` / `render` functions
+- `app/prompts/templates/summarize_article.v1.txt`: the first prompt. Its
+  variable names belong to the prompt's own vocabulary, not to the
+  database schema — the template says `abstract` where the column says
+  `summary`, and mapping the two is the calling service's job
+- `tests/test_prompts.py`: seven tests covering the file contract
+  (missing `user` section, malformed filename), both directions of
+  variable mismatch, literal brace survival, an absent `system` section,
+  and the happy path. No network, no database, no marker
 
 ### Changed
 
@@ -127,6 +147,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was rejected: it would bind the tests to wire JSON while the client
   has no behaviour beyond one call and a translation. Trigger: the
   client acquiring behaviour beyond that
+- **Template engine: Jinja2, configured with `StrictUndefined`.** Two
+  constraints drove the choice: prompts carry literal braces (Step 5's
+  structured-output schema examples), and a missing variable must be
+  loud. `str.format` was rejected because escaping every brace stops the
+  file from being plain text a human can copy into a playground —
+  defeating the reason for putting prompts on disk at all.
+  `string.Template` satisfies both constraints with zero dependencies and
+  was the initial choice; it was reversed because it forces a planned
+  engine migration once a prompt needs iteration, and the roughly half
+  hour saved today does not cover that. Jinja2's unused loop support
+  costs nothing: an unused capability inside a dependency carries no
+  maintenance, unlike an unused abstraction one writes oneself
+- **Both directions of variable mismatch are errors.** A declared
+  variable the caller omitted, and a supplied variable the template never
+  declared, both raise. The second is the one no library catches: Jinja2
+  silently ignores extra keys, so the caller believes data was injected,
+  the data never reaches the prompt, the model answers fluently from a
+  partial input, and the call is billed. Mutation testing confirmed the
+  asymmetry — removing the missing-variable check still fails loudly via
+  `StrictUndefined` (with a worse message), while removing the
+  extra-variable check produces no error at all
+- **Errors carry the prompt identifier.** Jinja2's `UndefinedError` names
+  the variable but not which prompt or which version failed; that
+  information exists only in the registry. Two types, split by who can
+  catch them: load failures happen at import and kill the process before
+  anything can handle them, render failures happen in front of a caller
+- **The version lives in the filename** (`<name>.v<N>.txt`), parsed into a
+  name and an integer at load time. An integer rather than semver, because
+  a prompt has no API surface for compatibility to describe; what Step 9
+  persists and v6 groups by is order. In the filename rather than in
+  file-internal metadata, because a frontmatter version can drift from the
+  filename and nobody notices. A filename that does not match the pattern
+  is an error, not a skipped file — skipping would hide the prompt's
+  existence until something asked for it and got "not found"
+- **Templates load once, at import, with no wiring.** The path resolves
+  against the module's own location rather than the working directory,
+  unlike `scripts/migrate.py`. Nothing is placed on `app.state` and no
+  dependency accessor exists: that pattern is for resources that are
+  expensive or need closing, and a few KB of text is neither. Eager
+  loading buys fail-fast for free — a malformed template raises during
+  import, so `uvicorn` never starts, rather than surfacing on the first
+  request
+- **One file per prompt, with named sections.** `user` required, `system`
+  optional and rendered as `None` when absent, matching
+  `complete(system=None)`. Two files per prompt was rejected because
+  nothing forces them to move together across a version bump. TOML and
+  YAML were rejected not because they cannot hold the text — a YAML block
+  scalar can — but because they add a parser's worth of failure surface
+  and stop the file from being plain text
+- **Decision (calibrated):** all three checks this step introduces were
+  verified by mutation. Removing the missing-variable check left one test
+  red on the error message rather than the exception type; removing the
+  extra-variable check left one test red with nothing raised at all.
+  Removing `StrictUndefined` broke nothing, because the pre-check shadows
+  it — recorded as a gap: the case it guards is a missing attribute on a
+  supplied object, which no template in the project currently uses
+
 ---
 
 ## [3.0.0] - 2026-08-17

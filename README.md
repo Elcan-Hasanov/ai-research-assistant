@@ -32,6 +32,7 @@ PostgreSQL + pgvector   Lexical index (GIN) and vector index (HNSW)
 app/
 ├── api/              Routers and the composition root for request-scoped wiring
 ├── core/             Config, database pool, embedding model, lifespan, error handlers
+├── prompts/          Versioned prompt templates and the loader that renders them
 ├── repositories/     Data access — raw SQL via asyncpg
 ├── schemas/          Pydantic DTOs
 ├── scrapers/         ArXiv ingestion client
@@ -50,6 +51,7 @@ evaluation/           Retrieval evaluation set and findings
 - **Vectors are namespaced by model.** `article_embeddings` uses a composite primary key (`arxiv_id`, `model_name`), so vectors from different models never share a ranking. `content_hash` records the exact text that produced each vector, making the backfill idempotent.
 - **Fail fast on mismatch.** The application verifies at startup that the loaded model's output dimension matches the configured schema dimension, rather than writing vectors the column will reject.
 - **CPU-bound work leaves the event loop.** Query encoding runs on a worker thread (`asyncio.to_thread`).
+- **Prompts are data, not code.** Templates live on disk as versioned files and are addressed by a `<name>.v<N>` identifier, so a generation can be tied to the exact prompt revision that produced it. Rendering is strict in both directions: a missing variable and an unexpected one both raise, because either one silently produces a prompt the caller did not intend.
 
 ---
 
@@ -67,6 +69,7 @@ evaluation/           Retrieval evaluation set and findings
 | **Testing** | pytest · pytest-asyncio |
 | **Data Collection** | Requests · BeautifulSoup4 |
 | **Runtime** | Docker Compose |
+| **Prompt Templates** | Jinja2 (`StrictUndefined`) |
 
 ---
 
