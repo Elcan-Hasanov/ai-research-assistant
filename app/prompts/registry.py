@@ -51,7 +51,7 @@ class RenderedPrompt(BaseModel):
     user: str
 
 
-_env = Environment()
+_env = Environment(undefined=StrictUndefined)
 
 
 def _split_sections(text: str, source: str) -> dict[str, str]:
