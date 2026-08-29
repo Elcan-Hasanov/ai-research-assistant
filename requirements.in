@@ -12,3 +12,4 @@ requests
 sentence-transformers
 pgvector
 anthropic
+jinja2

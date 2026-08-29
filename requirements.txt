@@ -70,7 +70,9 @@ idna==3.18
     #   httpx
     #   requests
 jinja2==3.1.6
-    # via torch
+    # via
+    #   -r requirements.in
+    #   torch
 jiter==0.16.0
     # via anthropic
 joblib==1.5.3
