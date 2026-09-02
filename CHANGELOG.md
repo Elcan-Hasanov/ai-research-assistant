@@ -55,6 +55,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (missing `user` section, malformed filename), both directions of
   variable mismatch, literal brace survival, an absent `system` section,
   and the happy path. No network, no database, no marker
+- `app/generation/`: the home of LLM output contracts. A leaf package —
+  it imports nothing else from this application, so parsing can be
+  exercised with no database, no network, and no client. `app/schemas/`
+  was rejected as the location: that package is the HTTP contract, and a
+  model validated against a provider's output does not live at the HTTP
+  boundary. A separate errors package was also rejected — in this project
+  a domain error type lives in the module that raises it, as `LLMError`
+  and `PromptRenderError` already do
+- `app/generation/extraction.py`: holds `PaperFacts` (the expected
+  response shape), `parse_paper_facts` (raw text in, validated object
+  out), `ExtractionValidationError`, and `ExtractionErrorCause`
+- `app/prompts/templates/extract_paper_facts.v1.txt`: the first prompt
+  that asks for structured output. It describes three fields in prose and
+  shows one compact example object rather than embedding a JSON Schema —
+  the schema already travels as a request parameter, and carrying it in
+  the prompt too would pay for it twice. Three different types, which is
+  the smallest set that exercises three separate validation paths
+- `tests/test_extraction.py`: three structural cases — valid JSON,
+  unparseable text, and JSON that parses but violates the schema. A
+  fourth case for output that satisfies the schema while being factually
+  wrong is deliberately absent: this layer does not catch it, and testing
+  for what a layer does not do misdescribes what the test protects.
+  Fourth database-free, network-free test file in the project
+- `scripts/probe_structured.py`: one-shot discovery probe. Answers three
+  questions that cannot be answered by reading code — whether the model
+  wraps its JSON without being asked, whether the gateway accepts
+  `output_config`, and how many content blocks come back. Not a
+  measurement script
+- `scripts/measure_json_compliance.py`: repeated measurement over a fixed
+  input, reporting a rate rather than a sample. Two arms, prompt-only and
+  `output_config`, and a classifier that names the failure shape — a bare
+  `0/10` does not distinguish a single systematic failure mode from three
+  mixed ones, and the two lead to different decisions
 
 ### Changed
 
@@ -70,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this changelog already records. Design rationale that is not derivable
   from the code — the retrieval contract, the testing scope decision, the
   evaluation findings — was kept
+- `CompletionStop` gains `REFUSED` and `CONTEXT_OVERFLOW`, and
+  `_STOP_REASONS` maps `refusal` and `model_context_window_exceeded` onto
+  them. The pinned SDK's `stop_reason` literal set holds seven values;
+  four were mapped in Step 3 and the rest fell to `UNKNOWN`. That was
+  correct at the time — nothing consumed them. A consumer arrived with
+  structured output: a parse failure now has three candidate causes, and
+  two of them were sitting in the same information-free bucket
+- `LLMClient.complete()` gains an optional `response_schema`, and
+  `FakeLLMClient` tracks the signature. The fake's job is to define the
+  LLM contract for tests; if its signature drifts from the real one, a
+  service that passes against the fake fails against the client and the
+  fake stops being evidence
 
 ### Decisions
 
@@ -203,6 +248,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Removing `StrictUndefined` broke nothing, because the pre-check shadows
   it — recorded as a gap: the case it guards is a missing attribute on a
   supplied object, which no template in the project currently uses
+- **Native structured output (measured, reversed).** The initial decision
+  was to rely on prompt instructions alone and validate locally, on three
+  grounds: gateway support was unverified, using it would widen Step 3's
+  signature, and its only benefit — a lower validation-failure rate — had
+  never been measured. All three were tested. The gateway accepts
+  `output_config`. The failure rate was measured on a fixed input with
+  the decision rule written first: **prompt-only produced directly
+  parseable JSON 0 times in 30, `output_config` 30 times in 30.** Every
+  prompt-only failure had the same shape — the model wrapped its JSON in
+  a markdown fence, despite the prompt forbidding it in those words. A
+  prompt instruction is a soft constraint competing with a formatting
+  prior, not a rule. Stripping the fence in code was the third option and
+  was rejected: it is correct only as long as one can enumerate the
+  shapes a model might emit, and `{fence: 30}` is an observation about
+  today's model, not a contract. Migration cost was at its lowest here —
+  `complete()` still has no caller, so nothing broke
+- **Local validation stays regardless.** Zero failures in 30 calls does
+  not bound the true failure rate near zero; with no failures in 10
+  trials the conservative upper bound on the failure rate is about 30%.
+  No practical sample size would license removing the validation layer,
+  which is why none was taken. Native constrains syntax; local validation
+  is the contract, and the contract must not depend on a provider feature
+- **The schema crosses the boundary as a plain `dict`.** The caller
+  supplies JSON Schema; wrapping it in the provider's envelope is the
+  client's job. Accepting a Pydantic model class instead was rejected:
+  the client would then have to know that a task has a response shape,
+  which is the same leak the prompt boundary already avoids. The
+  observable form of this decision: `grep -rln "output_config" app/`
+  returns one file. The schema's source is the Pydantic model in
+  `extraction.py`; the service that will carry it to the client arrives
+  in Step 6
+- **One error type, carrying a discriminator.** Unparseable text and a
+  schema violation reach Step 7's taxonomy at the same position — neither
+  is retryable and the caller behaves identically — so two types would be
+  a split with no consumer. Collapsing the *types* is not collapsing the
+  *information*: `ExtractionErrorCause` distinguishes the two cases, in
+  this project's vocabulary rather than Pydantic's. Naming the cause
+  `json_invalid` after Pydantic's internal error string was rejected for
+  the same reason provider stop reasons are mapped rather than passed
+  through — a library upgrade would then change a domain contract
+- **The error carries no model output.** Pydantic's `errors()` entries
+  include an `input` key holding the value that failed, and `str()` on a
+  `ValidationError` embeds it for some error types but not others. Only
+  `type`, `loc`, and `msg` are copied, by allow-list rather than by
+  deleting `input` — a deny-list silently leaks the day the library adds
+  a field. Measured: with the canary in the field that fails validation,
+  removing both defences leaves the leak test red; with the canary in any
+  other field the same mutation passes all three tests
+- **Field names belong to the prompt's vocabulary, not the database's.**
+  Symmetric with the template-variable decision from Step 4: mapping is
+  the calling service's job. The schema is kept minimal — every field is
+  one more thing the model must get right and one more way validation can
+  fail. A `reasoning` field, which gives a constrained model somewhere to
+  think before committing to values, was considered and deferred: its
+  benefit is unmeasured here, and it is reassessed together with any
+  future change to the constraint decision
+- **No repair layer, no retry on validation failure.** The scope says
+  validate, not repair, and a repair loop is a retry under another name —
+  both calls are billed. Trigger: validation failures being seen in
+  practice and repeatably
+- **Nothing is wired into the application.** No service, no endpoint,
+  no dependency accessor. The consumer arrives in Step 6, which will wire
+  both this and the client left unwired in Step 3
+- **Truncation diagnosis is not this layer's job.** `parse_paper_facts`
+  takes a `str`, so it never sees `stop`. That is what keeps the module a
+  leaf, and the cost is that "the JSON is incomplete because `max_tokens`
+  cut it" can only be established by whoever holds the completion and the
+  error at once — the service, in Step 6
+- **Decision (calibrated):** each behaviour this step claims to protect
+  was verified by an isolating mutation. Widening the schema's field
+  types to `Any` left exactly the schema-violation test red; forcing the
+  error cause to a constant left exactly the unparseable test red;
+  dropping `refusal` from the stop-reason table left exactly the new
+  translation test red; carrying Pydantic's raw error entries left
+  exactly the leak test red. A coarser mutation — replacing validation
+  with a bare `json.loads` — turned all three extraction tests red and
+  proved only that each protects *something*; how many tests a mutation
+  reddens is not a measure of its value
+
+### Measurements
+- **JSON compliance, fixed input, decision rule written first.**
+  Prompt-only 0/30 directly parseable, every failure a markdown fence;
+  `output_config` 30/30. Three runs of ten per arm
+- **Schema token cost.** Input tokens per call: 247 with no schema, 449
+  with a hand-written schema (230 characters), 500 with the schema
+  Pydantic generates (284 characters). The 51-token difference is
+  entirely `title` metadata Pydantic attaches to every field and to the
+  model; it constrains nothing. Not stripped: doing so requires a custom
+  schema generator, and 51 tokens is not a measured cost problem.
+  Trigger: the schema's share becoming a visible line item in Step 9's
+  accounting, or the schema growing in v5. Note the density — 284
+  characters cost 253 tokens, roughly 3.5 times the token-per-character
+  rate of prose, because JSON punctuation tokenises badly
+- **`additionalProperties` is not required by this gateway.** Pydantic's
+  schema omits it and was accepted 10/10. Some providers' strict modes
+  require it; this one does not
+- **Input tokenisation is deterministic, sampling is not.** Input token
+  counts were identical across every call in every run; output counts
+  were not. Step 9's cost accounting can predict the input side and only
+  the input side
+- **The two arms have the same latency; the schema costs money, not
+  time.** Under an interleaved run the medians are identical to two
+  decimals (1.76s both arms) despite arm B sending 253 more input tokens
+  per call. This is the prefill/decode asymmetry showing up as a number:
+  input tokens are processed in parallel, output tokens sequentially, so
+  a larger prompt buys a larger bill rather than a slower call. The
+  earlier 6.5x gap between arms was an artefact of the blocked design and
+  did not survive interleaving
+- **Observed latency spans 1.43s to 12.34s** across all sessions for the
+  same model and the same call. The 12.34s outlier was never reproduced
+  and its cause is unknown; gateway-side load or provider selection is
+  presumed. Recorded because Step 8's timeout threshold is a tail
+  decision: the tail lives in this record, not in any single run's
+  maximum, because a ten-call run in calm conditions reports a calm
+  maximum. A threshold set from the ~1.8s median would have killed the
+  12.34s call and billed the retry
+- **Multi-block responses did not materialise on this path.** Both arms
+  returned a single `text` block, so `to_completion` finds the payload
+  and the concern that a structured response might arrive in a
+  non-`text` block does not apply here
+
+### Known gaps
+
+- Chaining the `ValidationError` puts the failing field's value in the
+  traceback, and the global handler logs tracebacks. The allow-list
+  protects the error object, not Python's exception chain. Measured this
+  step; the same family as the SDK attaching request bodies and asyncpg
+  printing connection parameters. Logging discipline is Step 7
+- The three conditional payload keys in `complete()` — `system`,
+  `temperature`, `response_schema` — have no unit test. Testing them
+  needs a fake SDK transport, and the method still has no application
+  caller. Reassessed in Step 6, when the service supplies one
 
 ---
 
