@@ -74,3 +74,20 @@ def test_to_completion_handles_unknown_stop_reason():
     result = to_completion(message)
 
     assert result.stop == CompletionStop.UNKNOWN
+
+def test_to_completion_maps_refusal():
+    # "refusal" is inside the SDK's stop_reason Literal, so model_validate
+    # works and the SDK's own validation runs as part of the test.
+    message = Message.model_validate({**RAW, "stop_reason": "refusal"})
+    result = to_completion(message)
+
+    assert result.stop == CompletionStop.REFUSED
+
+
+def test_to_completion_maps_context_window_overflow():
+    message = Message.model_validate(
+        {**RAW, "stop_reason": "model_context_window_exceeded"}
+    )
+    result = to_completion(message)
+
+    assert result.stop == CompletionStop.CONTEXT_OVERFLOW

@@ -18,14 +18,22 @@ class CompletionStop(str, Enum):
     COMPLETED = "completed"
     TRUNCATED = "truncated"
     TOOL_USE = "tool_use"
+    REFUSED = "refused"
+    CONTEXT_OVERFLOW = "context_overflow"
     UNKNOWN = "unknown"
 
 
+# Provider vocabulary on the left, ours on the right. A value the provider adds
+# unilaterally falls through to UNKNOWN rather than breaking working code.
+# Only reasons with a consumer are mapped: "pause_turn" belongs to agent loops
+# and has none yet.
 _STOP_REASONS: dict[str, CompletionStop] = {
     "end_turn": CompletionStop.COMPLETED,
     "stop_sequence": CompletionStop.COMPLETED,
     "max_tokens": CompletionStop.TRUNCATED,
     "tool_use": CompletionStop.TOOL_USE,
+    "refusal": CompletionStop.REFUSED,
+    "model_context_window_exceeded": CompletionStop.CONTEXT_OVERFLOW,
 }
 
 
