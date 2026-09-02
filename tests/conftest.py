@@ -9,6 +9,7 @@ import hashlib
 import math
 import os
 import random
+from typing import Any
 
 import pytest
 
@@ -142,7 +143,16 @@ def fake_model() -> FakeEmbeddingModel:
 
 
 class FakeLLMClient:
-    """Fake LLM client for testing without network calls."""
+    """Duck-typed stand-in for LLMClient that never touches the network.
+
+    Its job is to define the LLM contract for tests, so its complete()
+    signature must track the real one. If it drifts, a service that calls the
+    real client will fail against the fake and the fake stops being evidence.
+
+    It has no failure mode and records no calls: neither has a consumer yet.
+    A failure mode arrives with the error taxonomy in Step 7, call recording
+    with the generation service in Step 6.
+    """
 
     def __init__(self, response: LLMCompletion | None = None) -> None:
         self._response = response or LLMCompletion(
@@ -161,6 +171,7 @@ class FakeLLMClient:
         model: str | None = None,
         system: str | None = None,
         temperature: float | None = None,
+        response_schema: dict | None = None,
     ) -> LLMCompletion:
         return self._response
 
