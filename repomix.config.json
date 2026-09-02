@@ -23,8 +23,8 @@
       "sortByChanges": true,
       "sortByChangesMaxCommits": 100,
       "includeDiffs": false,
-      "includeLogs": false,
-      "includeLogsCount": 50
+      "includeLogs": true,
+      "includeLogsCount": 10
     }
   },
   "include": [],
@@ -37,7 +37,6 @@
       "**/__pycache__/**",
       ".git/**",
       ".env",
-      ".env.*",
       "*.ipynb",
       "*.pyc",
       "node_modules/**"

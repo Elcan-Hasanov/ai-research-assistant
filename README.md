@@ -32,6 +32,7 @@ PostgreSQL + pgvector   Lexical index (GIN) and vector index (HNSW)
 app/
 ├── api/              Routers and the composition root for request-scoped wiring
 ├── core/             Config, database pool, embedding model, lifespan, error handlers
+├── generation/       LLM output contracts — response schemas, parsing, validation
 ├── prompts/          Versioned prompt templates and the loader that renders them
 ├── repositories/     Data access — raw SQL via asyncpg
 ├── schemas/          Pydantic DTOs
@@ -52,6 +53,7 @@ evaluation/           Retrieval evaluation set and findings
 - **Fail fast on mismatch.** The application verifies at startup that the loaded model's output dimension matches the configured schema dimension, rather than writing vectors the column will reject.
 - **CPU-bound work leaves the event loop.** Query encoding runs on a worker thread (`asyncio.to_thread`).
 - **Prompts are data, not code.** Templates live on disk as versioned files and are addressed by a `<name>.v<N>` identifier, so a generation can be tied to the exact prompt revision that produced it. Rendering is strict in both directions: a missing variable and an unexpected one both raise, because either one silently produces a prompt the caller did not intend.
+- **Generation is constrained at the source and validated on arrival.** Requests carry a JSON Schema so the provider constrains decoding, and the response is still validated locally against the same Pydantic model that produced that schema. The two are not redundant: constrained decoding guarantees syntax and only while the provider supports it, while local validation is the contract and holds regardless. Prompt instructions alone were measured and rejected — asked in words not to wrap its JSON in a markdown fence, the model did so on every one of 43 calls. Validation is structural: output that satisfies the schema while being factually wrong passes, which is why faithfulness is a separate concern for v6.
 
 ---
 
@@ -97,6 +99,7 @@ DB_PASSWORD=your_password
 DB_HOST=localhost
 DB_PORT=5432
 
+PYTHONPATH=.
 APP_NAME="AI Research Assistant API"
 APP_VERSION="4.0.0-dev"
 
@@ -107,12 +110,14 @@ EMBEDDING_BATCH_SIZE=32
 HNSW_EF_SEARCH=100
 
 LLM_API_KEY=
-LLM_MODEL="claude-haiku-4-5-20251001"
+LLM_BASE_URL="https://openrouter.ai/api/v1"
+LLM_MODEL="anthropic/claude-haiku-4.5"
 LLM_TIMEOUT_SECONDS=30
-LLM_BASE_URL=
 ```
 
-`EMBEDDING_DIMENSION` must match the vector column width defined in migration `005`; the application refuses to start if the loaded model disagrees. `LLM_API_KEY` is required at startup — a missing credential is a configuration error and should fail before the first request, not during it. `LLM_BASE_URL` is optional: leave it empty to talk to the provider directly, or point it at an Anthropic-compatible gateway.
+LLM_BASE_URL selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving LLM_BASE_URL empty switches back to the direct path and requires the native id.
+
+`EMBEDDING_DIMENSION` must match the vector column width defined in migration `005`; the application refuses to start if the loaded model disagrees. `LLM_API_KEY` is required at startup — a missing credential is a configuration error and should fail before the first request, not during it.
 
 Then bring the system up:
 
@@ -179,15 +184,17 @@ $env:DB_NAME = "arxiv_test"; python -m scripts.migrate; Remove-Item Env:\DB_NAME
 
 ```bash
 pytest                    # full suite
-pytest -m "not db"        # schema tests only, no database required
+pytest -m "not db"        # deselect the database-backed tests
 pytest --collect-only -q  # verify every test is actually collected
 ```
+
+-m "not db" deselects the tests that query PostgreSQL, but it does not currently let the suite run without one: a session-scoped readiness fixture connects before selection happens, so any subset still requires arxiv_test to exist. Making that fixture marker-aware is open work.
 
 ### Design
 
 - **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure.
 - **Separate database:** Tests never touch the working corpus. A behavioural guard refuses to run if the target database holds more articles than a test database plausibly would.
-- **One test double:** Only the embedding model is replaced, by a hand-written deterministic stand-in. The database is real — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing.
+- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in that returns canned values. The database is never replaced — the behaviour under test (= ANY semantics, websearch_to_tsquery conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.
 - **Mutation-calibrated:** Every test was validated by deliberately breaking the decision it claims to protect and confirming the test fails. A green suite is evidence only after this step.
 
 ---
@@ -204,6 +211,8 @@ pytest --collect-only -q  # verify every test is actually collected
 These artefacts form the first version of the benchmark dataset that v6's evaluation harness will build on.
 
 The `scripts/measure_*.py` family characterises the system rather than testing it: token-length distributions against the model's sequence limit, query-prefix impact on ranking, and HNSW recall versus latency across `ef_search` settings. `scripts/probe_llm.py` is a one-shot discovery probe for the LLM provider — it reports the SDK's default timeout and retry policy and dumps a raw response object, deliberately deriving no thresholds from a single sample.
+
+scripts/probe_structured.py does the same for structured output. scripts/measure_json_compliance.py is a measurement rather than a probe: it compares prompt-only instruction against a schema sent with the request over repeated calls on a fixed input, with the decision rule written before the run. Its two arms are interleaved rather than run in blocks — a blocked earlier version attributed a swing in gateway load to whichever arm happened to be running, and the causal claim built on it did not survive a second run.
 
 ---
 

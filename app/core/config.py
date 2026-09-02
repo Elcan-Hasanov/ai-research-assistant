@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # max_tokens and temperature are call-site arguments, not config: they
     # vary by task, not by environment.
     llm_api_key: SecretStr
-    llm_model: str = "claude-haiku-4-5-20251001"
+    llm_model: str = "anthropic/claude-haiku-4.5"
     llm_timeout_seconds: float = 30.0
     llm_base_url: str | None = None
 
