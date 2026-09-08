@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.dependencies import get_article_service
+from app.api.dependencies import get_article_service, get_generation_service
+from app.generation.extraction import PaperFacts
+from app.services.generation_service import GenerationService
 from app.schemas.article import ArticleFilterParams, ArticleResponse
 from app.schemas.retrieval import PaginatedResponse, RetrievalResult, SearchParams
 from app.services.article_service import ArticleService
@@ -77,3 +79,29 @@ async def get_article_by_id(
         )
 
     return article
+
+@router.post(
+    "/{arxiv_id}/facts",
+    response_model=PaperFacts,
+    responses={
+        404: {"description": "Article not found."},
+    },
+)
+async def extract_article_facts(
+    arxiv_id: str,
+    service: GenerationService = Depends(get_generation_service),
+) -> PaperFacts:
+    """Extract structured facts from one article using the LLM.
+
+    Errors from the generation layer are not yet classified: they reach the
+    global handler and surface as 500. That is deliberate — see Step 7.
+    """
+    facts = await service.extract_facts(arxiv_id)
+
+    if facts is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Article with arxiv_id '{arxiv_id}' not found",
+        )
+
+    return facts

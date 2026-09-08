@@ -19,8 +19,9 @@ Client
 FastAPI Router          HTTP concerns only — params, status codes
   │
   ▼
-Service Layer           Retrieval orchestration, query encoding,
-  │                     distance → score conversion, contract mapping
+Service Layer           Retrieval and generation orchestration; query
+  │                     encoding, distance → score conversion, prompt
+  │                     rendering, stop-reason diagnosis, contract mapping
   ▼
 Repository Layer        Raw SQL only — no ranking policy, no HTTP
   │
@@ -37,7 +38,7 @@ app/
 ├── repositories/     Data access — raw SQL via asyncpg
 ├── schemas/          Pydantic DTOs
 ├── scrapers/         ArXiv ingestion client
-└── services/         Retrieval orchestration and contract mapping
+└── services/         Retrieval and generation orchestration
 
 migrations/           Numbered, forward-only SQL migrations
 scripts/              Operational and laboratory scripts (migrate, ingest, backfill, measure_*)
@@ -54,6 +55,24 @@ evaluation/           Retrieval evaluation set and findings
 - **CPU-bound work leaves the event loop.** Query encoding runs on a worker thread (`asyncio.to_thread`).
 - **Prompts are data, not code.** Templates live on disk as versioned files and are addressed by a `<name>.v<N>` identifier, so a generation can be tied to the exact prompt revision that produced it. Rendering is strict in both directions: a missing variable and an unexpected one both raise, because either one silently produces a prompt the caller did not intend.
 - **Generation is constrained at the source and validated on arrival.** Requests carry a JSON Schema so the provider constrains decoding, and the response is still validated locally against the same Pydantic model that produced that schema. The two are not redundant: constrained decoding guarantees syntax and only while the provider supports it, while local validation is the contract and holds regardless. Prompt instructions alone were measured and rejected — asked in words not to wrap its JSON in a markdown fence, the model did so on every one of 43 calls. Validation is structural: output that satisfies the schema while being factually wrong passes, which is why faithfulness is a separate concern for v6.
+- **Diagnosis lives where the evidence is complete.** A parse failure has four
+  possible causes — the model produced malformed JSON, `max_tokens` cut the
+  stream, the model refused, or the context window overflowed — and the parser
+  cannot tell them apart, because the distinguishing evidence is the stop
+  reason and that never reaches it. The service is the only layer holding the
+  completion and the parse outcome at once, so the check sits there and runs
+  *before* validation rather than as an explanation after it. Constrained
+  decoding does not exempt a response from truncation: a cut that lands after
+  the closing brace still parses, and a parse-first ordering would accept it
+  silently.
+- **Checks that can run before the call, do.** An article with no abstract is
+  rejected before a request is sent. Rendering a null abstract produces the
+  literal string `None` in the prompt — the strict-undefined setting does not
+  catch it, because `None` is a value rather than a missing variable — and the
+  answer built on it satisfies the schema while being invented. The embedding
+  pipeline solved the same nullable column by substituting an empty string;
+  that answer is not carried over, because there the cost was CPU and here it
+  is a billed call plus a plausible wrong result.
 
 ---
 
@@ -145,6 +164,28 @@ Interactive documentation is generated automatically: [Swagger UI](http://127.0.
 | `GET` | `/articles/search` | Lexical full-text search with relevance ranking | `200`, `422` |
 | `GET` | `/articles/semantic-search` | Vector similarity search by cosine distance | `200`, `422` |
 | `GET` | `/articles/{arxiv_id}` | Fetch a single article by ArXiv ID | `200`, `404`, `422` |
+| `POST` | `/articles/{arxiv_id}/facts` | Extract structured facts from one article via the LLM | `200`, `404`, `500` |
+
+`POST /articles/{arxiv_id}/facts` returns a `PaperFacts` object — the problem
+the paper addresses, its claimed contributions, and whether it reports
+experiments of its own:
+
+```json
+{
+  "problem": "There is a lack of publicly available Arabic datasets for evaluating cross-target generalization in stance detection.",
+  "contributions": [
+    "Released a dataset of manually annotated Arabic tweets",
+    "Established baselines with transformer and zero-shot models"
+  ],
+  "evaluated": true
+}
+```
+
+Generation failures are not yet classified: an unusable abstract, a refusal, a
+truncated response and a provider outage all reach the global handler and
+surface as `500`. This is deliberate. The taxonomy that maps each of them onto
+a status the caller can act on is the next version step, and writing it before
+observing the undifferentiated case would make its rationale hypothetical.
 
 Both search endpoints return a paginated envelope of `RetrievalResult` objects:
 

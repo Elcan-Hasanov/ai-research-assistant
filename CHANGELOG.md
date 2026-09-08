@@ -88,6 +88,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `output_config`, and a classifier that names the failure shape — a bare
   `0/10` does not distinguish a single systematic failure mode from three
   mixed ones, and the two lead to different decisions
+- `LLMClient.aclose()`: the wrapper releases the transport it owns. The SDK
+  client holds an HTTP connection pool, which holds sockets and TLS sessions —
+  operating-system resources, not Python objects that garbage collection will
+  reclaim. The embedding model's pattern does not carry over here: it had
+  nothing to close
+- `app/services/generation_service.py`: the first orchestration layer over a
+  dependency that is non-deterministic, billed per call, and able to fail
+  partially. Holds `GenerationService`, `NoSummaryError`, `GenerationError`,
+  and two module-level helpers. `ArticleService` is untouched — the decision
+  not to open a separate service for semantic search does not transfer, since
+  that one rested on a shared repository and a shared `RetrievalResult`
+  contract
+- `GenerationService.extract_facts(arxiv_id)`: fetches one article by primary
+  key, maps its columns onto the template's vocabulary, renders the prompt,
+  carries the schema to the client, checks the stop reason, and validates the
+  text. Input selection belongs to the caller; a system that selects the
+  document by retrieval is v5
+- `GenerationService.summarize_article(arxiv_id)`: free-text summary over the
+  same pipeline, without a schema and without structured validation. It has no
+  consumer yet — no endpoint is bound to it
+- `POST /articles/{arxiv_id}/facts`. `POST` rather than `GET`: the call has a
+  side effect (it spends money) and is not idempotent (the same request
+  produces different output), neither of which a cacheable, safe method should
+  claim
+- `get_llm_client` and `get_generation_service` in `app/api/dependencies.py`.
+  The client is read from `app.state`, not constructed per request: an object
+  holding a connection pool is application-scoped for the same reason the
+  database pool is
+- LLM client acquisition and release in the application lifespan. `LLM_API_KEY`
+  now has a consumer inside the application; until this step it was required at
+  startup with nothing reading it
+- `tests/test_service_generation.py`: six service-level tests against a real
+  database and a faked provider. The database is not replaced — the behaviour
+  under test includes the repository query and the nullable column it returns.
+  The provider is, because a real call is non-deterministic, billed and slow
 
 ### Changed
 
@@ -115,6 +150,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LLM contract for tests; if its signature drifts from the real one, a
   service that passes against the fake fails against the client and the
   fake stops being evidence
+- Lifespan acquires resources inside `try/finally` and releases them in reverse
+  order. Previously the pool was created before the block and the teardown
+  reached through `app.state` to close it; with a second closeable resource,
+  failing to acquire the second would leak the first, and a teardown that reads
+  `app.state` raises on a path where the attribute was never set
+- `FakeLLMClient` records the arguments of every call. A canned response cannot
+  show whether the service rendered the right prompt, mapped the right columns,
+  or passed the schema at all; those are exactly the decisions this step
+  introduces. The trigger for call recording was written as this step when the
+  fake was first added. It still has no failure mode
+- The entry above for `tests/test_llm_client.py` described five translation
+  tests; the file now holds seven, after the refusal and context-overflow
+  mappings were added
 
 ### Decisions
 
@@ -326,7 +374,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a bare `json.loads` — turned all three extraction tests red and
   proved only that each protects *something*; how many tests a mutation
   reddens is not a measure of its value
-
+- **The stop reason is a precondition, not an explanation.** The service checks
+  `stop` before it calls the parser, rather than reading it to explain a failure
+  the parser already reported. Two measured facts drive the ordering:
+  constrained decoding guarantees syntax but not completion, so a truncation
+  landing after the closing brace parses cleanly and a parse-first ordering
+  accepts it silently; and a refusal returns prose, which parse-first would
+  report as unparseable output — technically true, diagnostically wrong. The
+  test that separates the two orderings feeds a truncated stop reason together
+  with *valid* JSON; with malformed JSON both orderings fail and the test proves
+  nothing
+- **An article with no usable abstract is rejected before the request is sent.**
+  Rendering a null value is silent — the template engine's strict-undefined mode
+  fires on missing variables, not on `None`, and puts the literal string in the
+  prompt. The response built from it satisfies the schema, so no downstream
+  layer catches it. Substituting an empty string, as the embedding pipeline
+  does for the same column, was rejected: the pattern transfers but its
+  conclusion does not, because that path costs CPU and this one costs a billed
+  call plus a persisted invention
+- **Two error types, split by when they occur rather than by what caused them.**
+  `NoSummaryError` is raised before any provider call and carries no token cost;
+  `GenerationError` is raised after one and always does. That boundary is what
+  the retry budget and the usage accounting will each need. `GenerationError`
+  carries the stop reason as data rather than folding four situations into one
+  message — truncation is retryable with a different token limit, a refusal is
+  not retryable at all, and a context overflow is not retryable without
+  shrinking the input. Same rule as the two error types before it: the type
+  carries data, so the layer above classifies without importing anything or
+  parsing a string. The message is a fixed string
+- **Not-found stays a return value.** The service returns `None` and the router
+  raises the HTTP error, as the article endpoint already does. An exception
+  handler binds to an exception type and cannot bind to a return value, so
+  moving this into the global handler would mean promoting a lookup's expected
+  outcome into an exception — a separate decision, revisited in the step that
+  builds the domain-error handlers
+- **No endpoint test.** The handler registered for bare `Exception` returns its
+  response and then re-raises, so the test client's default settings surface the
+  exception instead of the 500. Writing the first HTTP-level test in the project
+  to pin a behaviour the next step will change was not worth it; the three paths
+  were exercised by hand against the running application instead
+- **The second generation task shares preparation, not validation.** Fetching,
+  the empty-abstract check and rendering became module-level helpers once a
+  second method needed all three; the structured path keeps its schema and its
+  parser, and the free-text path has neither. The stop check is shared, because
+  an incomplete generation is unusable regardless of the output shape
+  
 ### Measurements
 - **JSON compliance, fixed input, decision rule written first.**
   Prompt-only 0/30 directly parseable, every failure a markdown fence;

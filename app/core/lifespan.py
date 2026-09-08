@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.core.config import get_settings
 from app.core.database import create_db_pool
 from app.core.embedding import EmbeddingModel, create_embedding_model
+from app.core.llm import create_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +35,32 @@ def _verify_embedding_dimension(model: EmbeddingModel) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Own the lifecycle of expensive, long-lived, shared resources."""
+    """Own the lifecycle of expensive, long-lived, shared resources.
 
-    app.state.pool = await create_db_pool()
-
-    model = create_embedding_model()
-    _verify_embedding_dimension(model)
-    app.state.embedding_model = model
-
-    logger.info("Application startup complete.")
+    Acquisition happens inside try/finally, and release runs in reverse
+    order. With two closeable resources, acquiring the second one is a
+    step that can fail after the first one is already open.
+    """
+    pool = None
+    llm_client = None
 
     try:
+        pool = await create_db_pool()
+        app.state.pool = pool
+
+        model = create_embedding_model()
+        _verify_embedding_dimension(model)
+        app.state.embedding_model = model
+
+        llm_client = create_llm_client()
+        app.state.llm_client = llm_client
+
+        logger.info("Application startup complete.")
+
         yield
     finally:
-        await app.state.pool.close()
+        if llm_client is not None:
+            await llm_client.aclose()
+        if pool is not None:
+            await pool.close()
         logger.info("Application shutdown complete.")

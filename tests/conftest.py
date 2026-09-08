@@ -149,9 +149,10 @@ class FakeLLMClient:
     signature must track the real one. If it drifts, a service that calls the
     real client will fail against the fake and the fake stops being evidence.
 
-    It has no failure mode and records no calls: neither has a consumer yet.
-    A failure mode arrives with the error taxonomy in Step 7, call recording
-    with the generation service in Step 6.
+    It records the arguments of the last call: a canned response cannot show
+    whether the service rendered the right prompt, mapped the right columns,
+    or passed the schema at all. It still has no failure mode — that arrives
+    with the error taxonomy in Step 7.
     """
 
     def __init__(self, response: LLMCompletion | None = None) -> None:
@@ -162,6 +163,7 @@ class FakeLLMClient:
             output_tokens=5,
             model="fake/test-llm",
         )
+        self.calls: list[dict[str, Any]] = []
 
     async def complete(
         self,
@@ -173,6 +175,16 @@ class FakeLLMClient:
         temperature: float | None = None,
         response_schema: dict | None = None,
     ) -> LLMCompletion:
+        self.calls.append(
+            {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "model": model,
+                "system": system,
+                "temperature": temperature,
+                "response_schema": response_schema,
+            }
+        )
         return self._response
 
 
