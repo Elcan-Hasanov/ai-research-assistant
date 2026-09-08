@@ -140,6 +140,10 @@ class LLMClient:
 
         return to_completion(message)
 
+    async def aclose(self) -> None:
+        """Close the underlying AsyncAnthropic client connection pool."""
+        await self._client.aclose()
+
 
 def create_llm_client(model: str | None = None) -> LLMClient:
     """Factory that builds the SDK client with this project's transport policy."""
