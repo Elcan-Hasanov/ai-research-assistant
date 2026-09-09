@@ -1,6 +1,7 @@
 from anthropic.types import Message
+from anthropic import AsyncAnthropic
 
-from app.core.llm import CompletionStop, to_completion
+from app.core.llm import CompletionStop, to_completion, LLMClient
 
 RAW = {
     "id": "gen-1787318162-WCISz7fTPyGtXjcLyjZG",
@@ -91,3 +92,16 @@ def test_to_completion_maps_context_window_overflow():
     result = to_completion(message)
 
     assert result.stop == CompletionStop.CONTEXT_OVERFLOW
+
+
+async def test_aclose_releases_the_real_sdk_client():
+    """The double cannot protect this: a hand-written fake would have
+    whatever attribute the code asked for. Only the real type can."""
+    sdk_client = AsyncAnthropic(api_key="sk-not-used", max_retries=0)
+    client = LLMClient(sdk_client, "fake/test-llm")
+
+    assert sdk_client.is_closed() is False
+
+    await client.aclose()
+
+    assert sdk_client.is_closed() is True

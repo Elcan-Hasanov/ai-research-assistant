@@ -142,7 +142,10 @@ class LLMClient:
 
     async def aclose(self) -> None:
         """Close the underlying AsyncAnthropic client connection pool."""
-        await self._client.aclose()
+        # AsyncAnthropic exposes close(), not aclose(). The aclose() name lives
+        # one layer down on the httpx client, which AsyncAPIClient.close() calls
+        # internally — reaching for it here raises AttributeError.
+        await self._client.close()
 
 
 def create_llm_client(model: str | None = None) -> LLMClient:

@@ -164,6 +164,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests; the file now holds seven, after the refusal and context-overflow
   mappings were added
 
+### Fixed
+
+- `LLMClient.aclose()` called `aclose()` on the SDK client, which does not
+  have it. `AsyncAnthropic` exposes `close()`; the `aclose()` name belongs
+  to the `httpx` client one layer below, which `AsyncAPIClient.close()`
+  calls internally. Every shutdown raised `AttributeError` from the first
+  statement of the lifespan's `finally` block, so `pool.close()` below it
+  never ran and the database pool leaked — the same resource-leak shape the
+  `try/finally` restructuring was written to prevent, arriving from the
+  release side instead of the acquisition side. The wrapper keeps its own
+  `aclose()` name: the `a` prefix marks a coroutine for this project's
+  callers and does not have to match what the wrapped SDK calls it
+  
 ### Decisions
 
 - **Provider transport (measured, revisited):** the original choice was a
