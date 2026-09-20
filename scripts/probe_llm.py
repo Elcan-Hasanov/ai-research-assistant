@@ -3,7 +3,7 @@
 This is NOT a measurement script. No decision rule is written here and no
 threshold is derived from its output: a single latency sample is an
 order-of-magnitude observation, not a distribution. Real measurement with a
-pre-written decision rule happens in Step 10.
+pre-written decision rule happens in the measurement scripts, not here.
 
 Run:
     python -m scripts.probe_llm
@@ -77,7 +77,7 @@ def report_call(client: Anthropic, model: str, max_tokens: int, label: str) -> N
     print("\n--- raw response object ---")
     print(response.model_dump_json(indent=2))
 
-    print("\n--- fields that will cross the Step 3 boundary ---")
+    print("\n--- fields that will cross the LLMClient boundary ---")
     print(f"  wall clock (s)      : {elapsed:.2f}")
     print(f"  stop_reason         : {response.stop_reason}")
     print(f"  content block count : {len(response.content)}")

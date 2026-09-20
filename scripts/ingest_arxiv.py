@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 ARXIV_ENDPOINT = "http://export.arxiv.org/api/query"
 
-# cs.AI alone does not cover the query set used from Step 10 onward
+# cs.AI alone does not cover the query set used for retrieval evaluation
 # (RLHF, PEFT, MoE, CoT). Those papers live mostly under cs.CL and cs.LG.
 DEFAULT_CATEGORIES = ["cs.AI", "cs.CL", "cs.LG"]
 
