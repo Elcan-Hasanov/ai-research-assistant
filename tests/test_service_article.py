@@ -2,7 +2,8 @@ import pytest
 
 from app.services.article_service import ArticleService
 from tests.factories import insert_article, insert_embedding
-
+from app.schemas.article import ArticleResponse
+from app.core.errors import NotFoundError
 
 pytestmark = pytest.mark.db
 
@@ -97,3 +98,14 @@ async def test_semantic_search_total_is_independent_of_limit(
 
     assert len(page.items) == 1
     assert page.total == 3
+
+
+async def test_get_by_arxiv_id_raises_not_found(service):
+    with pytest.raises(NotFoundError):
+        await service.get_by_arxiv_id("non.existent.id")
+
+async def test_get_by_arxiv_id_returns_the_requested_article(db_conn, service):
+    await insert_article(db_conn, arxiv_id="2401.00001", title="Test Title")
+    result = await service.get_by_arxiv_id("2401.00001")
+    assert isinstance(result, ArticleResponse)
+    assert result.arxiv_id == "2401.00001"

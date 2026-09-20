@@ -176,7 +176,7 @@ Interactive documentation is generated automatically: [Swagger UI](http://127.0.
 | `GET` | `/articles` | Paginated article listing with category filter | `200`, `422` |
 | `GET` | `/articles/search` | Lexical full-text search with relevance ranking | `200`, `422` |
 | `GET` | `/articles/semantic-search` | Vector similarity search by cosine distance | `200`, `422` |
-| `GET` | `/articles/{arxiv_id}` | Fetch a single article by ArXiv ID | `200`, `404`, `422` |
+| `GET` | `/articles/{arxiv_id}` | Fetch a single article by ArXiv ID | `200`, `404`, `500` |
 | `POST` | `/articles/{arxiv_id}/facts` | Extract structured facts from one article via the LLM | `200`, `404`, `422`, `500`, `503` |
 
 `POST /articles/{arxiv_id}/facts` returns a `PaperFacts` object — the problem

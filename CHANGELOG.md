@@ -213,7 +213,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the repository defines them, so the references resolved to nothing; the
   README roadmap defines versions, and a comment now either states its
   constraint or points at a version
-
+- `ArticleService.get_by_arxiv_id` still returns `None` for a missing article
+  and `GET /articles/{arxiv_id}` still raises `HTTPException` from that return
+  value, so the application holds two 404 mechanisms. Closed in a separate
+  commit immediately after this one; the method has no test today, so pinning
+  its current behaviour comes first
+  
 ### Fixed
 
 - `LLMClient.aclose()` called `aclose()` on the SDK client, which does not
@@ -655,11 +660,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   level breaks nothing, and the levels carry a real decision — `NOT_FOUND` logs
   at `INFO` precisely because it is not a malfunction. Reassessed in v6, when
   alerting rules bind to them
-- `ArticleService.get_by_arxiv_id` still returns `None` for a missing article
-  and `GET /articles/{arxiv_id}` still raises `HTTPException` from that return
-  value, so the application holds two 404 mechanisms. Closed in a separate
-  commit immediately after this one; the method has no test today, so pinning
-  its current behaviour comes first
 
 ---
 

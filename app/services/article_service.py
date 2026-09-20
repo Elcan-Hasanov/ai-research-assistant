@@ -2,6 +2,7 @@ from app.repositories.article_repository import ArticleRepository
 from app.schemas.article import ArticleResponse
 from app.schemas.retrieval import PaginatedResponse, RetrievalResult
 from app.core.embedding import EmbeddingModel
+from app.core.errors import NotFoundError
 import asyncio
 
 class ArticleService:
@@ -29,12 +30,10 @@ class ArticleService:
             offset=offset,
         )
 
-    async def get_by_arxiv_id(self, arxiv_id: str) -> ArticleResponse | None:
+    async def get_by_arxiv_id(self, arxiv_id: str) -> ArticleResponse:
         record = await self._repository.get_by_arxiv_id(arxiv_id)
-
         if record is None:
-            return None
-
+            raise NotFoundError(arxiv_id=arxiv_id)
         return ArticleResponse(**record)
 
     async def search_articles(
