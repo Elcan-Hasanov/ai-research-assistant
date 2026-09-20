@@ -105,3 +105,97 @@ async def test_aclose_releases_the_real_sdk_client():
     await client.aclose()
 
     assert sdk_client.is_closed() is True
+
+
+import anthropic
+import httpx
+import pytest
+
+from app.core.errors import FailureCategory
+from app.core.llm import LLMClient, LLMError
+
+
+# ============================================================================
+# Provider error -> LLMError. Everything below LLMClient is the real stack;
+# only the socket is replaced, so the SDK builds the request and raises the
+# exception exactly as it would in production.
+# ============================================================================
+
+def _responding(status_code: int, error_type: str):
+    """A transport handler that answers every request with one provider error."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={"type": "error", "error": {"type": error_type, "message": "…"}},
+        )
+    return handler
+
+
+def _client_for(handler) -> tuple[LLMClient, list[httpx.Request]]:
+    """A real LLMClient over a real AsyncAnthropic whose socket is faked.
+
+    max_retries is set here so that a call count of one means "complete()
+    called the provider once" rather than "the SDK happened not to retry".
+    It does not pin the factory's own setting — nothing does.
+    """
+    sent: list[httpx.Request] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return handler(request)
+
+    sdk_client = anthropic.AsyncAnthropic(
+        api_key="sk-not-used",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(recording)),
+    )
+    return LLMClient(sdk_client, "fake/test-llm"), sent
+
+
+async def test_rate_limit_is_translated_and_carries_the_status():
+    client, sent = _client_for(_responding(429, "rate_limit_error"))
+
+    try:
+        with pytest.raises(LLMError) as caught:
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    error = caught.value
+    assert error.status_code == 429
+    assert error.provider_error == "RateLimitError"
+    assert error.category is FailureCategory.UPSTREAM_UNAVAILABLE
+    assert str(error) == "LLM request failed"
+    assert len(sent) == 1, "the SDK's own retry policy must stay disabled"
+
+
+async def test_authentication_failure_is_translated_to_internal():
+    client, _ = _client_for(_responding(401, "authentication_error"))
+
+    try:
+        with pytest.raises(LLMError) as caught:
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert caught.value.status_code == 401
+    assert caught.value.provider_error == "AuthenticationError"
+    assert caught.value.category is FailureCategory.INTERNAL
+
+
+async def test_connection_failure_arrives_without_a_status_code():
+    """Nothing reached HTTP, so status_code is absent rather than unknown."""
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client, _ = _client_for(refuse)
+
+    try:
+        with pytest.raises(LLMError) as caught:
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert caught.value.status_code is None
+    assert caught.value.provider_error == "APIConnectionError"
+    assert caught.value.category is FailureCategory.UPSTREAM_UNAVAILABLE

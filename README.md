@@ -73,6 +73,19 @@ evaluation/           Retrieval evaluation set and findings
   pipeline solved the same nullable column by substituting an empty string;
   that answer is not carried over, because there the cost was CPU and here it
   is a billed call plus a plausible wrong result.
+- **Failures are classified by what the caller can do, not by where they came
+  from.** Every error type carries one of four categories in the application's
+  own vocabulary — neither the provider's nor HTTP's — and a single handler at
+  the outermost layer is the only place that turns a category into a status
+  code. Two failures raised in different modules share a status when they leave
+  the caller the same options: a model refusal and an article with no abstract
+  both surface as `422`. The category is also what a retry layer will read, so
+  the decision to retry never has to be reconstructed from a status code chosen
+  for a different audience. Domain errors are logged without their traceback,
+  because the exception chain carries exactly what the error types were built to
+  withhold — the value a validation rejected, the response body a provider
+  attached. Unclassified failures keep theirs: for a genuine bug there is
+  nothing else to log.
 
 ---
 
@@ -99,8 +112,8 @@ evaluation/           Retrieval evaluation set and findings
 **Prerequisites:** Python 3.12+, Docker, Git.
 
 ```bash
-git clone https://github.com/Elcan-Hasanov/arxiv-research-assistant.git
-cd arxiv-research-assistant
+git clone https://github.com/Elcan-Hasanov/ai-research-assistant.git
+cd ai-research-assistant
 
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -164,7 +177,7 @@ Interactive documentation is generated automatically: [Swagger UI](http://127.0.
 | `GET` | `/articles/search` | Lexical full-text search with relevance ranking | `200`, `422` |
 | `GET` | `/articles/semantic-search` | Vector similarity search by cosine distance | `200`, `422` |
 | `GET` | `/articles/{arxiv_id}` | Fetch a single article by ArXiv ID | `200`, `404`, `422` |
-| `POST` | `/articles/{arxiv_id}/facts` | Extract structured facts from one article via the LLM | `200`, `404`, `500` |
+| `POST` | `/articles/{arxiv_id}/facts` | Extract structured facts from one article via the LLM | `200`, `404`, `422`, `500`, `503` |
 
 `POST /articles/{arxiv_id}/facts` returns a `PaperFacts` object — the problem
 the paper addresses, its claimed contributions, and whether it reports
@@ -181,11 +194,13 @@ experiments of its own:
 }
 ```
 
-Generation failures are not yet classified: an unusable abstract, a refusal, a
-truncated response and a provider outage all reach the global handler and
-surface as `500`. This is deliberate. The taxonomy that maps each of them onto
-a status the caller can act on is the next version step, and writing it before
-observing the undifferentiated case would make its rationale hypothetical.
+`404` means no article answers to that id. `422` means the article exists but
+cannot be turned into facts: it has no abstract, the model declined it, or it
+is longer than the context window — a different article may work. `503` means
+the language model service was saturated or unreachable, so the same request
+may succeed later. `500` means the failure is on this side — a bad credential,
+a response the schema rejected, a bug — and there is nothing the caller can do
+differently.
 
 Both search endpoints return a paginated envelope of `RetrievalResult` objects:
 

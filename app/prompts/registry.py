@@ -10,6 +10,7 @@ from pathlib import Path
 from jinja2 import Environment, StrictUndefined, TemplateSyntaxError, meta
 from jinja2.exceptions import UndefinedError
 from pydantic import BaseModel
+from app.core.errors import FailureCategory, AppError
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -18,8 +19,15 @@ _MARKER_RE = re.compile(r"^---\s*(?P<section>[a-z]+)\s*---$")
 _SECTIONS = ("system", "user")
 
 
-class PromptError(Exception):
+# Declared once and inherited by both subtypes: a malformed template file and a
+# bad render call are the same kind of failure, ours, and produce the same
+# caller-facing outcome. PromptLoadError additionally never reaches a request —
+# its only producer runs at module import — so no handler will ever see it.
+class PromptError(AppError):
     """Base for every failure raised by this module."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, category=FailureCategory.INTERNAL)
 
 
 class PromptLoadError(PromptError):

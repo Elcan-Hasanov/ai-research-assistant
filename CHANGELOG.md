@@ -119,10 +119,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM client acquisition and release in the application lifespan. `LLM_API_KEY`
   now has a consumer inside the application; until this step it was required at
   startup with nothing reading it
-- `tests/test_service_generation.py`: six service-level tests against a real
+- `tests/test_service_generation.py`: eight service-level tests against a real
   database and a faked provider. The database is not replaced — the behaviour
   under test includes the repository query and the nullable column it returns.
   The provider is, because a real call is non-deterministic, billed and slow
+- `app/core/errors.py`: `AppError` and `FailureCategory`. Every error type the
+  application raises derives from one base, so a single handler registration
+  catches all of them through the MRO walk. The module holds vocabulary only —
+  no HTTP, no provider names, no import from an upper layer
+- `NotFoundError`, and `NOT_FOUND` as the fourth category. It is the one error
+  type defined here rather than in the module that raises it: the other seven
+  each belong to one boundary, while a missing resource belongs to any lookup
+  and two services in `app/services` raise it. Defining it in either would make
+  one service import the other
+- `public_message` on `AppError`: a second message with a second audience. The
+  first goes to the log and may name templates, models or internal state; this
+  one crosses the network and holds fixed text plus, at most, values the caller
+  supplied in the request itself
+- `log_context()` on `AppError`: the discriminating fields a fixed message
+  cannot carry. `LLMError` returns its status and provider class name,
+  `GenerationError` its stop reason, `ExtractionValidationError` its cause. The
+  four types whose message already carries the detail return nothing
+- `app_error_handler` and `_CATEGORY_CONFIG` in `app/core/exceptions.py`: one
+  table mapping each category to a status code and a log level, read by direct
+  indexing so a category missing from it fails loudly rather than defaulting
+- `tests/test_error_taxonomy.py`: twelve tests pinning error type → category,
+  public message and log context, with no HTTP involved
+- `tests/test_error_mapping.py`: five tests pinning category → status code and
+  response body. The project's first endpoint tests; the app is driven through
+  `TestClient` with `get_generation_service` overridden, so no lifespan runs and
+  no database, model or network is touched
+- Three tests in `tests/test_llm_client.py` covering the provider-error
+  translation end to end: a real `AsyncAnthropic` over an `httpx.MockTransport`,
+  so the SDK builds the request and raises the exception exactly as in
+  production and only the socket is replaced
 
 ### Changed
 
@@ -160,9 +190,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or passed the schema at all; those are exactly the decisions this step
   introduces. The trigger for call recording was written as this step when the
   fake was first added. It still has no failure mode
-- The entry above for `tests/test_llm_client.py` described five translation
-  tests; the file now holds seven, after the refusal and context-overflow
-  mappings were added
+- The seven existing error types derive from `AppError` and declare a category.
+  `PromptError` declares one and both subtypes inherit it; inheritance of the
+  field is allowed, because the requirement is enforced by the constructor
+  signature rather than by a class-creation check
+- `GenerationService.extract_facts` and `summarize_article` return
+  `PaperFacts` and `str` rather than `… | None`, and raise `NotFoundError`
+  instead. A return value cannot be bound to an exception handler, so moving
+  the 404 into the taxonomy meant changing the service contract, not the router
+- `POST /articles/{arxiv_id}/facts` no longer raises `HTTPException`; all five
+  of its statuses now come from the same handler. `GET /articles/{arxiv_id}`
+  still raises it from a return value and is left for a separate commit —
+  `ArticleService` is untouched by this version
+- The endpoint's `responses` declares every status it actually produces. The
+  README table was carrying `200, 404, 500` and has been brought in sync
+- `handle_unexpected_error` logs without a traceback. `ServerErrorMiddleware`
+  re-raises unconditionally, so the ASGI server prints the chain anyway and the
+  handler's own copy was the second one
+- `app/core/exceptions.py` uses a module logger rather than the root logger,
+  matching every other module in the application
+- Step numbers removed from comments in application code and scripts. Nothing
+  in the repository defines them, so the references resolved to nothing; the
+  README roadmap defines versions, and a comment now either states its
+  constraint or points at a version
 
 ### Fixed
 
@@ -431,7 +481,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second method needed all three; the structured path keeps its schema and its
   parser, and the free-text path has neither. The stop check is shared, because
   an incomplete generation is unusable regardless of the output shape
-  
+  - **Classification is carried on the error type, not looked up in a central
+  table.** A table would let a newly added type fall through to a default while
+  nothing complained; a required keyword-only constructor argument means a type
+  that supplies no category cannot be constructed at all. The enforcement is
+  the signature, so no `__init_subclass__` check was written: a mechanism was
+  drafted twice and both drafts leaked — the first through `hasattr` walking
+  the MRO, the second through an `is_abstract` escape hatch that is itself
+  inherited
+- **One handler registered on the base type, not one per type.** Because
+  classification is data, the handler body does not branch on the concrete
+  type; per-type registration would register the same function eight times and
+  force `app/core/exceptions.py` to import four upper-layer modules, breaking a
+  direction rule that has held since v2. Trigger: one type needing HTTP
+  behaviour different from its category's — the MRO walk resolves a specific
+  registration ahead of the base one
+- **HTTP status is not a field on the error type.** Error types carry a
+  category in our own vocabulary; the translation to a status code happens only
+  at the outermost layer. A status on the type would make a retry loop or a
+  background worker — neither of them HTTP consumers — carry HTTP vocabulary
+- **No `retryable` field.** Across all thirteen failure modes, retryability is
+  `category is UPSTREAM_UNAVAILABLE`; a second hand-declared field is a second
+  field that can contradict the first. Trigger: a mode becoming retryable
+  without being upstream-unavailable — the two known candidates are a
+  truncation retried with a larger `max_tokens` and a schema violation retried
+  against non-deterministic sampling, and both already have their own triggers
+- **Domain errors are logged without a traceback; unclassified ones keep
+  theirs.** The exception chain carries what the error types were built to
+  withhold: a chained `ValidationError` prints the rejected value in
+  `input_value`, and an SDK error's message embeds the provider's full response
+  body. The allow-list protects the error object, not Python's chain. A genuine
+  bug has no structured fields, so for it the traceback is the only evidence
+- **`handle_database_error` left as it is.** The concrete reason to touch it
+  was a reported leak of connection parameters; the leak could not be
+  reproduced this step, and a failed connection raises `ConnectionRefusedError`,
+  which is not a `PostgresError` and never reaches that handler. Trigger: a
+  leak observed on the `PostgresError` path
+- **Not found joined the taxonomy.** An endpoint's success/failure line follows
+  the contract it declares, not how ordinary the event is: `POST /facts`
+  promises a `PaperFacts` object, and a missing article means it cannot be
+  produced — the same reasoning already applied to a model refusal. The
+  alternative kept status codes defined in two places, so the handler was not
+  the single source of the set an API can return. The member needed three
+  exceptions to the rules the other categories follow: `INFO` rather than
+  `WARNING`/`ERROR`, an interpolated public message rather than a fixed
+  literal, and a home in `errors.py` rather than in the module that raises it.
+  Trigger: a fourth
+- **`public_message` may interpolate values the caller supplied.** The rule was
+  written as "never interpolates anything" and was relaxed deliberately when
+  the 404 body had to keep naming the requested id. A value that arrived in the
+  caller's own URL is not a leak; a provider response, model output or piece of
+  internal state still is
+- **The provider-error translation is tested through the real SDK, not through
+  `FakeLLMClient`.** A double raising a hand-built `LLMError` would only assert
+  what the test itself constructed. Driving a real `AsyncAnthropic` over a
+  faked socket means the SDK maps the status to its own exception class and the
+  client translates that, which is the behaviour the whole taxonomy rests on.
+  It also covers the branch where `status_code` is absent: a transport-level
+  connection failure produces `APIConnectionError`, a class that has no such
+  attribute at all. `FakeLLMClient` still has no failure mode, and its written
+  trigger fired this step and was declined
+- **`RetryableError` and `WorkloadIdentityError` are out of scope because they
+  are unreachable, not because they are unlikely.** `RetryableError` is an
+  input to the SDK's retry policy — something middleware raises to request a
+  retry — and the SDK never raises it; `WorkloadIdentityError` comes only from
+  the workload-identity credential providers, which a plain `api_key` never
+  engages. The earlier note describing the first as a gap in `except
+  anthropic.APIError` was a reachability error
+- **This file is doing four jobs and will be split at the version tag.**
+  `Added`/`Changed`/`Fixed` are a changelog; `Decisions` is an architecture
+  decision record, `Measurements` is the evidence behind it, and `Known gaps`
+  is an issue list. Measured across versions the file grows roughly fivefold
+  per release — 6, 21, 192, 470 lines — and `Decisions` is already 54% of the
+  unreleased section. The lifetimes conflict: a changelog entry is written once
+  and frozen, while a decision can be superseded, and three were this version.
+  Writing a superseded decision into a frozen document is what produced the
+  correction line that used to sit under the `test_llm_client.py` entry.
+  Deferred to the `v4.0.0` tag rather than done now, because the version close
+  rewrites this file anyway and splitting earlier means doing it twice.
+  Measurements will move into the decision that used them, not into a file of
+  their own; separating them would leave the decisions without their evidence
+
 ### Measurements
 - **JSON compliance, fixed input, decision rule written first.**
   Prompt-only 0/30 directly parseable, every failure a markdown fence;
@@ -473,18 +603,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned a single `text` block, so `to_completion` finds the payload
   and the concern that a structured response might arrive in a
   non-`text` block does not apply here
-
+- **The two exception middlewares behave differently, and this decided the log
+  discipline.** `Starlette.build_middleware_stack` routes handlers registered
+  for `500` or bare `Exception` to `ServerErrorMiddleware` and everything else
+  to `ExceptionMiddleware`. The first sends its response and then re-raises
+  unconditionally; the second does not re-raise when a handler is found. The
+  double traceback observed in Step 6 came from the first path, and registering
+  specific types removes it without any change to the handler
+- **Handler lookup walks `type(exc).__mro__`.** A handler on a base type
+  catches every descendant, and when both a base and a child are registered the
+  child wins regardless of registration order. Verified by running both
+  orderings; `HTTPException` is resolved by integer status code first, ahead of
+  the MRO walk
+- **The SDK collapses every status ≥ 500 into `InternalServerError`.**
+  `_make_status_error` maps 400, 401, 403, 404, 409, 413, 422, 429 and 529 to
+  their own classes and everything else above 500 to one. `ServiceUnavailable`
+  and `DeadlineExceeded` exist as classes but this code path never produces
+  them, so 500, 502, 503 and 504 share a class name and only the number tells
+  them apart — which is why the category is derived from `status_code` and not
+  from the class
+- **`extra=` is invisible with this log format.** Passing structured fields
+  through `logging`'s `extra` parameter sets attributes on the record, and the
+  formatter — `%(asctime)s - %(levelname)s - %(message)s` — never reads them.
+  Nothing is printed and nothing warns. Fields go into the message through
+  `%`-args instead
+- **Test suite cost is an import, not the database.** Of a 6.9-second warm run,
+  5.35s is collection and 1.55s is execution; excluding
+  `tests/test_service_retrieval.py` from collection drops it to 0.07s, because
+  that file is the only one that reaches `sentence_transformers` through
+  `ArticleService`. The 28 database cases cost roughly 1.4s in total. A first
+  cold run measured 23.85s and did not reproduce
+  
 ### Known gaps
 
 - Chaining the `ValidationError` puts the failing field's value in the
-  traceback, and the global handler logs tracebacks. The allow-list
-  protects the error object, not Python's exception chain. Measured this
-  step; the same family as the SDK attaching request bodies and asyncpg
-  printing connection parameters. Logging discipline is Step 7
+  traceback. Closed for the `AppError` path this step — those errors are logged
+  without a chain. `handle_database_error` still logs one, deliberately: see
+  the decision above
 - The three conditional payload keys in `complete()` — `system`,
-  `temperature`, `response_schema` — have no unit test. Testing them
-  needs a fake SDK transport, and the method still has no application
-  caller. Reassessed in Step 6, when the service supplies one
+  `temperature`, `response_schema` — have no unit test. The fake SDK transport
+  that was named as the blocker now exists in `tests/test_llm_client.py`, so
+  the cost of closing this is a handler that records the outgoing request body
+  rather than new infrastructure
+- `create_llm_client` passes `max_retries=0` and nothing pins it. Left at the
+  SDK default of 2, it would multiply with any retry budget layered above the
+  client: a three-attempt budget becomes nine billed calls. The translation
+  tests set the value themselves, so they pin their own setup rather than the
+  factory's. Reassessed in Step 8, when a retry budget gives the invariant a
+  live consumer
+- The `log_level` half of `_CATEGORY_CONFIG` has no test. Changing a category's
+  level breaks nothing, and the levels carry a real decision — `NOT_FOUND` logs
+  at `INFO` precisely because it is not a malfunction. Reassessed in v6, when
+  alerting rules bind to them
+- `ArticleService.get_by_arxiv_id` still returns `None` for a missing article
+  and `GET /articles/{arxiv_id}` still raises `HTTPException` from that return
+  value, so the application holds two 404 mechanisms. Closed in a separate
+  commit immediately after this one; the method has no test today, so pinning
+  its current behaviour comes first
 
 ---
 

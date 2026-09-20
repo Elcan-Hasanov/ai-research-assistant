@@ -151,8 +151,15 @@ class FakeLLMClient:
 
     It records the arguments of the last call: a canned response cannot show
     whether the service rendered the right prompt, mapped the right columns,
-    or passed the schema at all. It still has no failure mode — that arrives
-    with the error taxonomy in Step 7.
+    or passed the schema at all.
+
+It has no failure mode, and deliberately so. The translation from a
+    provider error to LLMError is exercised in test_llm_client.py against a
+    real AsyncAnthropic over a faked socket, which is where that behaviour
+    lives; raising a canned LLMError here would only assert what the test
+    itself constructed. A failure mode answers a different question — what
+    the service does when the client raises — and today that is the absence
+    of a catch. It arrives with the first test that pins it.
     """
 
     def __init__(self, response: LLMCompletion | None = None) -> None:

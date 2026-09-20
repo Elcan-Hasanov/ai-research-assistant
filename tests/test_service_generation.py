@@ -10,6 +10,7 @@ import json
 import pytest
 
 from app.core.llm import CompletionStop, LLMCompletion
+from app.core.errors import NotFoundError
 from app.generation.extraction import PaperFacts
 from app.services.generation_service import (
     GenerationError,
@@ -162,11 +163,12 @@ async def test_extract_facts_rejects_truncated_response_even_when_text_parses(
     assert len(client.calls) == 1
 
 
-async def test_extract_facts_returns_none_when_article_not_found(repository):
+async def test_extract_facts_raises_not_found_when_article_not_found(repository):
     client = FakeLLMClient()
     service = GenerationService(repository, client)
 
-    result = await service.extract_facts("nonexistent.00000")
+    with pytest.raises(NotFoundError) as caught:
+        await service.extract_facts("nonexistent.00000")
 
-    assert result is None
+    assert caught.value.arxiv_id == "nonexistent.00000"
     assert len(client.calls) == 0

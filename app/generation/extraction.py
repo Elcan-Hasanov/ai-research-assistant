@@ -1,6 +1,7 @@
 from enum import Enum
 from pydantic import BaseModel, ValidationError
 
+from app.core.errors import FailureCategory, AppError
 
 class ExtractionErrorCause(str, Enum):
     """Specific cause categories for LLM extraction failure."""
@@ -9,13 +10,21 @@ class ExtractionErrorCause(str, Enum):
     SCHEMA_VIOLATION = "schema_violation"
 
 
-class ExtractionValidationError(Exception):
+class ExtractionValidationError(AppError):
     """Raised when LLM text extraction or JSON validation fails."""
 
-    def __init__(self, message: str, cause: ExtractionErrorCause, details: list[dict]):
-        super().__init__(message)
+    def __init__(self, message: str, *, cause: ExtractionErrorCause, details: list[dict]) -> None:
+        # The category deliberately does not branch on `cause`. Both causes
+        # describe the model failing to satisfy a constraint we set ourselves,
+        # so neither is attributable to the caller's choice of article. `cause`
+        # stays on the instance because it still distinguishes the two for
+        # diagnosis, just not for classification.
+        super().__init__(message, category=FailureCategory.INTERNAL)
         self.cause = cause
         self.details = details
+
+    def log_context(self) -> dict[str, object]:
+        return {"cause": self.cause.value}
 
 
 class PaperFacts(BaseModel):

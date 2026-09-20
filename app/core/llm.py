@@ -8,6 +8,7 @@ from anthropic.types import Message
 from pydantic import BaseModel
 
 from app.core.config import get_settings
+from app.core.errors import FailureCategory, AppError
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,44 @@ class LLMCompletion(BaseModel):
     model: str
 
 
-class LLMError(Exception):
+# Provider status code on the left, our classification on the right. Three
+# branches carry a decision the number alone does not explain:
+#   None  -> we never reached HTTP at all (connection or timeout); this is a
+#            distinct branch, not missing data.
+#   5xx   -> covers 529, Anthropic's overload signal, which is not a standard
+#            HTTP code. It also covers 503 and 504: the SDK collapses every
+#            code >= 500 into InternalServerError, so only the number tells
+#            them apart.
+#   else  -> INTERNAL. An unrecognised code is not the caller's fault until we
+#            can show it is, and INTERNAL is also the branch that does not
+#            spend money on a retry.
+def _categorise_status(status_code: int | None) -> FailureCategory:
+    if status_code is None:
+        return FailureCategory.UPSTREAM_UNAVAILABLE
+
+    if status_code == 429 or 500 <= status_code < 600:
+        return FailureCategory.UPSTREAM_UNAVAILABLE
+
+    if status_code == 413:
+        return FailureCategory.UNUSABLE_SOURCE 
+
+    return FailureCategory.INTERNAL
+
+
+# One message per category: at this boundary the status code does not carry
+# anything the caller could act on beyond what the category already says.
+_PUBLIC_MESSAGES: dict[FailureCategory, str] = {
+    FailureCategory.UPSTREAM_UNAVAILABLE: (
+        "The language model service is temporarily unavailable. "
+        "Please try again shortly."
+    ),
+    FailureCategory.UNUSABLE_SOURCE: (
+        "This article is too large to send to the language model."
+    ),
+}
+
+
+class LLMError(AppError):
     """Provider-agnostic failure raised at the LLM boundary."""
 
     def __init__(
@@ -57,9 +95,17 @@ class LLMError(Exception):
         status_code: int | None = None,
         provider_error: str | None = None,
     ) -> None:
-        super().__init__(message)
+        category = _categorise_status(status_code)
+        super().__init__(
+            message,
+            category=category,
+            public_message=_PUBLIC_MESSAGES.get(category),
+        )
         self.status_code = status_code
         self.provider_error = provider_error
+
+    def log_context(self) -> dict[str, object]:
+        return {"status": self.status_code, "provider": self.provider_error}
 
 
 def to_completion(message: Message) -> LLMCompletion:
