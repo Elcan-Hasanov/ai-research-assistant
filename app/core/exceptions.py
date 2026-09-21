@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_database_error(request: Request, exc: asyncpg.PostgresError) -> JSONResponse:
-    logger.error("Database error occurred: %s", exc)
+    logger.exception("Database error occurred: %s", exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "Database service is currently unavailable. Please try again later."}
@@ -18,7 +18,7 @@ async def handle_database_error(request: Request, exc: asyncpg.PostgresError) ->
 
 
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("Unhandled server error occurred: %s", exc)
+    logger.exception("Unhandled server error occurred: %s", exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "An unexpected server error occurred."}
