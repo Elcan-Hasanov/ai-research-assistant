@@ -24,6 +24,34 @@ async def list_articles(
     )
 
 
+@router.get("/search", response_model=PaginatedResponse[RetrievalResult])
+async def search_articles(
+    params: SearchParams = Depends(),
+    service: ArticleService = Depends(get_article_service),
+) -> PaginatedResponse[RetrievalResult]:
+    """Lexical (keyword) search via PostgreSQL full-text search."""
+
+    return await service.search_articles(
+        query=params.q,
+        limit=params.limit,
+        offset=params.offset,
+    )
+
+
+@router.get("/semantic-search", response_model=PaginatedResponse[RetrievalResult])
+async def semantic_search_articles(
+    params: SearchParams = Depends(),
+    service: ArticleService = Depends(get_article_service),
+) -> PaginatedResponse[RetrievalResult]:
+    """Semantic (vector) search via pgvector cosine distance."""
+
+    return await service.semantic_search(
+        query=params.q,
+        limit=params.limit,
+        offset=params.offset,
+    )
+
+
 @router.get(
     "/{arxiv_id}",
     response_model=ArticleResponse,
