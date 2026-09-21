@@ -201,7 +201,7 @@ def create_llm_client(model: str | None = None) -> LLMClient:
     credential = settings.llm_api_key.get_secret_value()
 
     # The SDK's own retry policy is switched off on both paths. Left at its
-    # default of 2, it would multiply with the retry budget added in Step 8:
+    # default of 2, it would multiply with the any retry budget above this layer would multiply with it
     # a three-attempt budget would become nine billed calls.
     if settings.llm_base_url:
         # Gateway path: bearer token, not x-api-key. api_key is passed as None
