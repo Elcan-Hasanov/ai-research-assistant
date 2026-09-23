@@ -166,7 +166,7 @@ async def test_rate_limit_is_translated_and_carries_the_status():
     assert error.provider_error == "RateLimitError"
     assert error.category is FailureCategory.UPSTREAM_UNAVAILABLE
     assert str(error) == "LLM request failed"
-    assert len(sent) == 1, "the SDK's own retry policy must stay disabled"
+    assert len(sent) == 1, "complete() must make exactly one provider call"
 
 
 async def test_authentication_failure_is_translated_to_internal():
