@@ -11,12 +11,13 @@ import os
 import random
 from typing import Any
 
+from fastapi.testclient import TestClient
 import pytest
 
 from app.core.config import get_settings
 from app.core.database import create_script_pool, get_standalone_db_connection
-from app.repositories.article_repository import ArticleRepository
 from app.core.llm import CompletionStop, LLMCompletion
+from app.repositories.article_repository import ArticleRepository
 
 
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "arxiv_test")
@@ -198,3 +199,10 @@ It has no failure mode, and deliberately so. The translation from a
 @pytest.fixture
 def fake_llm_client() -> FakeLLMClient:
     return FakeLLMClient()
+
+@pytest.fixture
+def api_client():
+    from app.main import app
+    client = TestClient(app)
+    yield client
+    app.dependency_overrides.clear()

@@ -221,7 +221,11 @@ Both search endpoints return a paginated envelope of `RetrievalResult` objects:
 
 ## Testing
 
-The suite targets the surfaces where a wrong answer is **silent** — a swapped `ORDER BY` direction, a dropped `WHERE` clause, a transposed `LIMIT`/`OFFSET` pair. Paths that fail loudly, and lab scripts whose output a human already reads, are deliberately out of scope. This is not a coverage-driven suite.
+The suite targets the surfaces where a wrong answer is **silent** — a swapped
+`ORDER BY` direction, a dropped `WHERE` clause, a transposed `LIMIT`/`OFFSET`
+pair, a deleted route whose requests are quietly absorbed by the catch-all
+below it. Paths that fail loudly, and lab scripts whose output a human already
+reads, are deliberately out of scope. This is not a coverage-driven suite.
 
 Create a dedicated test database once, then apply the schema to it:
 
@@ -248,9 +252,11 @@ pytest --collect-only -q  # verify every test is actually collected
 
 ### Design
 
+### Design
+
 - **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure.
 - **Separate database:** Tests never touch the working corpus. A behavioural guard refuses to run if the target database holds more articles than a test database plausibly would.
-- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in that returns canned values. The database is never replaced — the behaviour under test (= ANY semantics, websearch_to_tsquery conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.
+- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.
 - **Mutation-calibrated:** Every test was validated by deliberately breaking the decision it claims to protect and confirming the test fails. A green suite is evidence only after this step.
 
 ---

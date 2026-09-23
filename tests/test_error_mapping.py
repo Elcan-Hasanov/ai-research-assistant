@@ -1,6 +1,3 @@
-import pytest
-from fastapi.testclient import TestClient
-
 from app.api.dependencies import get_generation_service
 from app.core.llm import LLMError
 from app.core.errors import NotFoundError
@@ -24,13 +21,6 @@ class _StubGenerationService:
         if self._error is not None:
             raise self._error
         return self._result
-
-
-@pytest.fixture
-def api_client():
-    client = TestClient(app)
-    yield client
-    app.dependency_overrides.clear()
 
 
 def _serve(stub: _StubGenerationService) -> None:

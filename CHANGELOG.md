@@ -153,6 +153,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   translation end to end: a real `AsyncAnthropic` over an `httpx.MockTransport`,
   so the SDK builds the request and raises the exception exactly as in
   production and only the socket is replaced
+- `tests/test_router_articles.py`: four tests holding the wiring still, one per
+  route on the articles router. Each installs a recording double at the service
+  dependency and asserts which method the request reached, because the status
+  code cannot tell a correct route from a misrouted one
 
 ### Changed
 
@@ -218,7 +222,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, so the application holds two 404 mechanisms. Closed in a separate
   commit immediately after this one; the method has no test today, so pinning
   its current behaviour comes first
-  
+  - The `api_client` fixture moved from `tests/test_error_mapping.py` to
+  `tests/conftest.py`, now that a second file drives the app over HTTP. Its
+  import of `app.main` is inside the fixture body rather than at module level:
+  at module level every test run would pay the five seconds that reaching
+  `sentence_transformers` costs, including the runs that never touch the app
+
 ### Fixed
 
 - `LLMClient.aclose()` called `aclose()` on the SDK client, which does not
@@ -566,6 +575,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrites this file anyway and splitting earlier means doing it twice.
   Measurements will move into the decision that used them, not into a file of
   their own; separating them would leave the decisions without their evidence
+- **Route tests assert which service method ran, not the status code.** A
+  route can disappear without the URL going dark: with `/articles/search`
+  deleted, the request matched `/articles/{arxiv_id}` and was served as a
+  lookup for an article whose id is `search`. The status assertion passed on
+  that path and only the call record caught it. The same reasoning that put a
+  `calls` list on the LLM double applies one layer up — when a wrong path can
+  produce a right-looking result, the interaction is the evidence, not the
+  outcome
+- **The router is tested for dispatch, not for existence.** An existence check
+  — introspecting `app.routes`, or asserting the URL answers at all — passes in
+  exactly the case that broke, because the catch-all answered. What needed
+  holding still was the pairing between a URL and the method that serves it,
+  and only a real request through the stack demonstrates it
 
 ### Measurements
 - **JSON compliance, fixed input, decision rule written first.**
@@ -638,7 +660,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that file is the only one that reaches `sentence_transformers` through
   `ArticleService`. The 28 database cases cost roughly 1.4s in total. A first
   cold run measured 23.85s and did not reproduce
-  
+  - **Route declaration order decides which handler wins, silently.** Starlette
+  tries routes in declaration order and the first match serves the request.
+  `/articles/{arxiv_id}` matches any single segment, `search` included, so the
+  literal routes only work while they are declared above it. Reversing the two
+  changes the answer with no warning at startup and no error at runtime:
+  `/articles/search?q=transformers` comes back `200` either way, from a
+  different handler
+- **A search term does not survive a path segment.** Compared both shapes
+  across six query strings: `cs.AI/ML` answers `404` as `/search/{q}` and `200`
+  as `/search?q=`, because `/` is a separator in a path and a value in a query
+  string. `limit` and `offset` settle it independently — both carry defaults,
+  and a path parameter cannot be omitted
+
 ### Known gaps
 
 - Chaining the `ValidationError` puts the failing field's value in the
@@ -660,6 +694,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   level breaks nothing, and the levels carry a real decision — `NOT_FOUND` logs
   at `INFO` precisely because it is not a malfunction. Reassessed in v6, when
   alerting rules bind to them
+- `search_articles` does not say which search it is, while its sibling
+  `semantic_search` does. The name was accurate in v2, when there was one
+  search to name, and went stale when the second arrived rather than through
+  any decision. Renaming touches 53 occurrences across seven files plus the
+  `/articles/search` path, which is a public contract. Reassessed in v5: hybrid
+  search forces all three to be named at once, and a path change belongs on a
+  version boundary
 
 ---
 
