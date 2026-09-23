@@ -154,7 +154,7 @@ class FakeLLMClient:
     whether the service rendered the right prompt, mapped the right columns,
     or passed the schema at all.
 
-It has no failure mode, and deliberately so. The translation from a
+    It has no failure mode, and deliberately so. The translation from a
     provider error to LLMError is exercised in test_llm_client.py against a
     real AsyncAnthropic over a faked socket, which is where that behaviour
     lives; raising a canned LLMError here would only assert what the test

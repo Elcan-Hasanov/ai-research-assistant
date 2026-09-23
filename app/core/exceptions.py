@@ -18,7 +18,7 @@ async def handle_database_error(request: Request, exc: asyncpg.PostgresError) ->
 
 
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled server error occurred: %s", exc)
+    logger.error("Unhandled server error occurred: %s", exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "An unexpected server error occurred."}
