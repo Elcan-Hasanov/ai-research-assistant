@@ -154,16 +154,22 @@ class FakeLLMClient:
     whether the service rendered the right prompt, mapped the right columns,
     or passed the schema at all.
 
-    It has no failure mode, and deliberately so. The translation from a
-    provider error to LLMError is exercised in test_llm_client.py against a
-    real AsyncAnthropic over a faked socket, which is where that behaviour
-    lives; raising a canned LLMError here would only assert what the test
-    itself constructed. A failure mode answers a different question — what
-    the service does when the client raises — and today that is the absence
-    of a catch. It arrives with the first test that pins it.
+    It fails only on script. Given outcomes, it plays them back one per
+    call: a completion is returned, an exception is raised, and a call past
+    the end of the script fails the test, so an unplanned extra attempt
+    cannot pass unseen. The failure mode arrived with the retry layer, the
+    first code whose behaviour depends on what the client raises. Translating
+    a provider error into LLMError is still tested in test_llm_client.py,
+    against a real AsyncAnthropic over a faked socket; the errors scripted
+    here are for the decisions made above the client.
     """
 
-    def __init__(self, response: LLMCompletion | None = None) -> None:
+    def __init__(
+        self,
+        response: LLMCompletion | None = None,
+        *,
+        outcomes: list[LLMCompletion | Exception] | None = None,
+    ) -> None:
         self._response = response or LLMCompletion(
             text="Fake LLM response",
             stop=CompletionStop.COMPLETED,
@@ -171,6 +177,7 @@ class FakeLLMClient:
             output_tokens=5,
             model="fake/test-llm",
         )
+        self._outcomes = None if outcomes is None else list(outcomes)
         self.calls: list[dict[str, Any]] = []
 
     async def complete(
@@ -193,7 +200,14 @@ class FakeLLMClient:
                 "response_schema": response_schema,
             }
         )
-        return self._response
+        if self._outcomes is None:
+            return self._response
+        if not self._outcomes:
+            raise AssertionError(f"FakeLLMClient: call {len(self.calls)} was not in the script")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 @pytest.fixture
