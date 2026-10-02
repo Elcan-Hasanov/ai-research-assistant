@@ -3,6 +3,8 @@ from enum import Enum
 from typing import Any
 
 import anthropic
+import httpx
+import math
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
 from pydantic import BaseModel
@@ -94,6 +96,7 @@ class LLMError(AppError):
         *,
         status_code: int | None = None,
         provider_error: str | None = None,
+        retry_after: float | None = None,
     ) -> None:
         category = _categorise_status(status_code)
         super().__init__(
@@ -103,9 +106,13 @@ class LLMError(AppError):
         )
         self.status_code = status_code
         self.provider_error = provider_error
+        self.retry_after = retry_after
 
     def log_context(self) -> dict[str, object]:
-        return {"status": self.status_code, "provider": self.provider_error}
+        context: dict[str, object] = {"status": self.status_code, "provider": self.provider_error}
+        if self.retry_after is not None:
+            context["retry_after"] = self.retry_after
+        return context
 
 
 def to_completion(message: Message) -> LLMCompletion:
@@ -176,12 +183,20 @@ class LLMClient:
         try:
             message = await self._client.messages.create(**payload)
         except anthropic.APIError as exc:
+            # Only status errors carry a response; a connection failure or a
+            # timeout never got one, so there is no header to read.
+            retry_after = (
+                parse_retry_after(exc.response.headers)
+                if isinstance(exc, anthropic.APIStatusError)
+                else None
+            )
             # A fixed string, never str(exc): SDK errors can echo the request
             # body back, and that body holds the prompt.
             raise LLMError(
                 "LLM request failed",
                 status_code=getattr(exc, "status_code", None),
                 provider_error=type(exc).__name__,
+                retry_after=retry_after,
             ) from exc
 
         return to_completion(message)
@@ -194,11 +209,23 @@ class LLMClient:
         await self._client.close()
 
 
+# Connection setup either completes quickly or not at all. Passing one float
+# as the timeout would set every phase to it and lift this bound from the
+# SDK's 5s to the configured 30s; with a retry layer above, a dead network
+# would then cost up to three of those before the caller heard anything.
+_CONNECT_TIMEOUT_SECONDS = 5.0
+
+
 def create_llm_client(model: str | None = None) -> LLMClient:
     """Factory that builds the SDK client with this project's transport policy."""
     settings = get_settings()
     name = model or settings.llm_model
     credential = settings.llm_api_key.get_secret_value()
+
+    # llm_timeout_seconds bounds the read, write and pool phases. Each is a
+    # limit on silence within the phase, not on the length of the call: a
+    # response that keeps sending bytes can outlast it.
+    timeout = httpx.Timeout(settings.llm_timeout_seconds, connect=_CONNECT_TIMEOUT_SECONDS)
 
     # The SDK's own retry policy is switched off on both paths. Left at its
     # default of 2, it would multiply with any retry budget layered above this
@@ -210,13 +237,13 @@ def create_llm_client(model: str | None = None) -> LLMClient:
             api_key=None,
             auth_token=credential,
             base_url=settings.llm_base_url,
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
             max_retries=0,
         )
     else:
         sdk_client = AsyncAnthropic(
             api_key=credential,
-            timeout=settings.llm_timeout_seconds,
+            timeout=timeout,
             max_retries=0,
         )
 
@@ -226,3 +253,18 @@ def create_llm_client(model: str | None = None) -> LLMClient:
         bool(settings.llm_base_url),
     )
     return LLMClient(sdk_client, name)
+
+
+def parse_retry_after(headers: httpx.Headers) -> float | None:
+    """The wait the provider asked for, in seconds, or None if it asked for none."""
+    for name, per_second in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        raw = headers.get(name)
+        if raw is None:
+            continue
+        try:
+            seconds = float(raw) / per_second
+        except ValueError:
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None

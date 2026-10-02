@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # vary by task, not by environment.
     llm_api_key: SecretStr
     llm_model: str = "anthropic/claude-haiku-4.5"
+    
+    # Bounds the read, write and pool phases of one attempt: the longest
+    # silence tolerated within each, not the length of the call. The connect
+    # phase has its own fixed bound in app/core/llm.py.
     llm_timeout_seconds: float = 30.0
     llm_base_url: str | None = None
 

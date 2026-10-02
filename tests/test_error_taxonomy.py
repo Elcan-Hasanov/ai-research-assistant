@@ -46,6 +46,12 @@ def test_rate_limit_is_upstream_unavailable():
     )
 
 
+def test_retry_after_appears_in_the_log_when_present():
+    error = LLMError("LLM request failed", status_code=429, provider_error="RateLimitError", retry_after=7.0)
+
+    assert error.log_context() == {"status": 429, "provider": "RateLimitError", "retry_after": 7.0}
+
+
 def test_missing_status_code_is_upstream_unavailable():
     """A connection or timeout failure never reached HTTP, so status_code is
     absent. That is a branch of its own, not missing data."""

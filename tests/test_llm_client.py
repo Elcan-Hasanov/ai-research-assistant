@@ -1,7 +1,20 @@
-from anthropic.types import Message
+import anthropic
 from anthropic import AsyncAnthropic
+from anthropic.types import Message
+import httpx
+import pytest
 
-from app.core.llm import CompletionStop, to_completion, LLMClient
+from app.core.config import get_settings
+from app.core.errors import FailureCategory
+from app.core.llm import (
+    CompletionStop,
+    LLMClient,
+    LLMError,
+    create_llm_client,
+    to_completion,
+    parse_retry_after
+)
+
 
 RAW = {
     "id": "gen-1787318162-WCISz7fTPyGtXjcLyjZG",
@@ -107,26 +120,19 @@ async def test_aclose_releases_the_real_sdk_client():
     assert sdk_client.is_closed() is True
 
 
-import anthropic
-import httpx
-import pytest
-
-from app.core.errors import FailureCategory
-from app.core.llm import LLMClient, LLMError
-
-
 # ============================================================================
 # Provider error -> LLMError. Everything below LLMClient is the real stack;
 # only the socket is replaced, so the SDK builds the request and raises the
 # exception exactly as it would in production.
 # ============================================================================
 
-def _responding(status_code: int, error_type: str):
+def _responding(status_code: int, error_type: str, headers: dict[str, str] | None = None):
     """A transport handler that answers every request with one provider error."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             status_code,
             json={"type": "error", "error": {"type": error_type, "message": "…"}},
+            headers=headers,
         )
     return handler
 
@@ -153,7 +159,7 @@ def _client_for(handler) -> tuple[LLMClient, list[httpx.Request]]:
 
 
 async def test_rate_limit_is_translated_and_carries_the_status():
-    client, sent = _client_for(_responding(429, "rate_limit_error"))
+    client, _ = _client_for(_responding(429, "rate_limit_error"))
 
     try:
         with pytest.raises(LLMError) as caught:
@@ -166,7 +172,6 @@ async def test_rate_limit_is_translated_and_carries_the_status():
     assert error.provider_error == "RateLimitError"
     assert error.category is FailureCategory.UPSTREAM_UNAVAILABLE
     assert str(error) == "LLM request failed"
-    assert len(sent) == 1, "complete() must make exactly one provider call"
 
 
 async def test_authentication_failure_is_translated_to_internal():
@@ -199,3 +204,125 @@ async def test_connection_failure_arrives_without_a_status_code():
     assert caught.value.status_code is None
     assert caught.value.provider_error == "APIConnectionError"
     assert caught.value.category is FailureCategory.UPSTREAM_UNAVAILABLE
+
+
+async def test_retry_after_reaches_the_error():
+    client, _ = _client_for(_responding(429, "rate_limit_error", headers={"retry-after": "7"}))
+
+    try:
+        with pytest.raises(LLMError) as caught:
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    error = caught.value
+    assert error.retry_after == 7.0
+
+
+# ============================================================================
+# The factory's transport policy. The client is built exactly as the
+# application builds it, on each of the factory's two paths.
+# ============================================================================
+
+@pytest.fixture(
+    params=["https://gateway.test/api/v1", ""],
+    ids=["gateway", "direct"],
+)
+async def factory_built_client(request, monkeypatch):
+    """The client as create_llm_client builds it, once per path.
+
+    An environment variable outranks .env, and an empty LLM_BASE_URL selects
+    the direct path because the factory branches on the value's truthiness.
+    get_settings is cached: it is cleared on the way in so this test sees its
+    own URL, and on the way out so the next test does not inherit it.
+    """
+    monkeypatch.setenv("LLM_BASE_URL", request.param)
+    get_settings.cache_clear()
+    client = create_llm_client()
+    try:
+        yield client
+    finally:
+        await client.aclose()
+        get_settings.cache_clear()
+
+
+async def test_factory_switches_off_the_sdk_retry(factory_built_client):
+    """The retry budget lives one layer up. Left at the SDK default of 2,
+    every attempt that layer makes would become up to three billed calls.
+
+    This pins configuration rather than behaviour: the factory builds its own
+    transport, so no fake socket can be slipped underneath it."""
+    assert factory_built_client._client.max_retries == 0
+
+
+def _raising(exc_type: type[httpx.TransportError]):
+    """A transport handler that fails every request with one transport error."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise exc_type("simulated transport failure")
+    return handler
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        _responding(429, "rate_limit_error"),
+        _responding(503, "api_error"),
+        _responding(529, "overloaded_error"),
+        _raising(httpx.ConnectError),
+        _raising(httpx.ReadTimeout),
+    ],
+    ids=["429-rate-limit", "503-server-error", "529-overloaded", "connect-refused", "read-timeout"],
+)
+async def test_complete_makes_one_call_on_every_retryable_failure(handler):
+    """complete() reaches the provider exactly once on every failure the retry layer will retry. 
+    That layer's attempt budget multiplies whatever happens here."""
+    client, sent = _client_for(handler)
+
+    try:
+        with pytest.raises(LLMError):
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert len(sent) == 1, "complete() must make exactly one provider call"
+
+
+async def test_factory_uses_layered_timeouts(factory_built_client):
+    """Connection setup either succeeds quickly or not at all, so the connect
+    phase gets its own short bound; a request that never left is the cheapest
+    one to retry, and should stay cheap in time as well.
+
+    The other three phases keep the configured bound. It limits the silence
+    between bytes within a phase, not the length of the call."""
+    bound = get_settings().llm_timeout_seconds
+    assert factory_built_client._client.timeout == httpx.Timeout(
+        connect=5.0, read=bound, write=bound, pool=bound
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "7"}, 7.0),
+        ({"retry-after-ms": "1500"}, 1.5),
+        ({"retry-after-ms": "1500", "retry-after": "7"}, 1.5),
+        ({"retry-after-ms": "soon", "retry-after": "7"}, 7.0),
+        ({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}, None),
+        ({"retry-after": "-3"}, None),
+        ({"retry-after": "inf"}, None),
+        ({}, None),
+    ],
+    ids=[
+        "seconds",
+        "milliseconds",
+        "milliseconds-win",
+        "bad-milliseconds-fall-back",
+        "http-date",
+        "negative",
+        "infinite",
+        "absent",
+    ],
+)
+def test_retry_after_is_read_as_seconds(headers, expected):
+    actual = parse_retry_after(httpx.Headers(headers))
+    assert actual == expected
