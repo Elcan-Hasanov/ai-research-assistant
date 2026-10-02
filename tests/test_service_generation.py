@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from app.core.llm import CompletionStop, LLMCompletion
+from app.core.llm import CompletionStop, LLMCompletion, LLMError
 from app.core.errors import NotFoundError
 from app.generation.extraction import PaperFacts
 from app.services.generation_service import (
@@ -172,3 +172,52 @@ async def test_extract_facts_raises_not_found_when_article_not_found(repository)
 
     assert caught.value.arxiv_id == "nonexistent.00000"
     assert len(client.calls) == 0
+
+
+async def test_extract_facts_retries_an_unavailable_upstream(repository, seeded_article):
+    """The provider call goes through the retry layer the service ships with: 
+    an unavailable first attempt is followed by a second, and the facts come from that one."""
+
+    # Lets the shipped retrier retry without waiting.
+    client = FakeLLMClient(
+        outcomes=[
+            LLMError(
+                "LLM request failed",
+                status_code=429,
+                provider_error="RateLimitError",
+                retry_after=0.0,
+            ),
+            completed(FACTS_JSON),
+        ]
+    )
+    service = GenerationService(repository, client)
+
+    facts = await service.extract_facts(seeded_article)
+
+    assert len(client.calls) == 2
+
+    assert isinstance(facts, PaperFacts)
+
+async def test_summarize_article_retries_an_unavailable_upstream(repository, seeded_article):
+    """The same holds for the summary: the first attempt fails as unavailable, and the summary comes from the second."""
+
+    expected_summary = "A three-sentence concise summary of the academic paper."
+    # Lets the shipped retrier retry without waiting.
+    client = FakeLLMClient(
+        outcomes=[
+            LLMError(
+                "LLM request failed",
+                status_code=429,
+                provider_error="RateLimitError",
+                retry_after=0.0,
+            ),
+            completed(expected_summary),
+        ]
+    )
+    service = GenerationService(repository, client)
+
+    summary = await service.summarize_article(seeded_article)
+
+    assert len(client.calls) == 2
+
+    assert summary == expected_summary

@@ -3,6 +3,7 @@ from app.core.errors import FailureCategory, AppError, NotFoundError
 from app.generation.extraction import PaperFacts, parse_paper_facts
 from app.prompts.registry import RenderedPrompt, render
 from app.repositories.article_repository import ArticleRepository
+from app.core.retry import Retrier
 
 
 # Category and caller-facing message both derive from `stop`, and they do not
@@ -73,6 +74,7 @@ class GenerationService:
     def __init__(self, repository: ArticleRepository, client: LLMClient) -> None:
         self._repository = repository
         self._client = client
+        self._retrier = Retrier()
 
     async def extract_facts(self, arxiv_id: str) -> PaperFacts:
         record = await self._repository.get_by_arxiv_id(arxiv_id)
@@ -81,11 +83,13 @@ class GenerationService:
 
         prompt = _prepare_prompt(record, "extract_paper_facts.v1")
 
-        completion = await self._client.complete(
-            messages=[{"role": "user", "content": prompt.user}],
-            max_tokens=500,
-            system=prompt.system,
-            response_schema=PaperFacts.model_json_schema(),
+        completion = await self._retrier.run(
+            lambda: self._client.complete(
+                messages=[{"role": "user", "content": prompt.user}],
+                max_tokens=500,
+                system=prompt.system,
+                response_schema=PaperFacts.model_json_schema(),
+            )
         )
         _require_completed(completion)
 
@@ -99,10 +103,12 @@ class GenerationService:
         prompt = _prepare_prompt(record, "summarize_article.v1")
 
         # max_tokens=500 is copied from extract_facts; unmeasured for free-text summary.
-        completion = await self._client.complete(
-            messages=[{"role": "user", "content": prompt.user}],
-            max_tokens=500,
-            system=prompt.system,
+        completion = await self._retrier.run(
+            lambda: self._client.complete(
+                messages=[{"role": "user", "content": prompt.user}],
+                max_tokens=500,
+                system=prompt.system,
+            )
         )
         _require_completed(completion)
 
