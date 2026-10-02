@@ -79,13 +79,29 @@ evaluation/           Retrieval evaluation set and findings
   the outermost layer is the only place that turns a category into a status
   code. Two failures raised in different modules share a status when they leave
   the caller the same options: a model refusal and an article with no abstract
-  both surface as `422`. The category is also what a retry layer will read, so
+  both surface as `422`. The category is also what the retry layer reads, so
   the decision to retry never has to be reconstructed from a status code chosen
   for a different audience. Domain errors are logged without their traceback,
   because the exception chain carries exactly what the error types were built to
   withhold — the value a validation rejected, the response body a provider
   attached. Unclassified failures keep theirs: for a genuine bug there is
   nothing else to log.
+- **Retries live in one layer, above a client that never retries.** The SDK's
+  own retry is switched off and `complete()` makes exactly one provider call;
+  a single retry layer between the service and the client decides, reading
+  only the failure category. Retries at two layers multiply — three attempts
+  at each would be nine billed calls. The policy restores the one the SDK
+  shipped with: three attempts, a wait that starts at half a second and
+  doubles, and a `Retry-After` from the provider honoured up to a minute. A
+  longer one ends the retrying instead, because trying sooner than asked
+  repeats a request the provider has just refused. A request that timed out
+  is retried even though the provider may already have billed it:
+  `max_tokens` caps that cost, and the read bound sits well above the longest
+  generation `max_tokens` allows, so a timeout signals a stall rather than a
+  slow answer. There is no deadline on the whole request — cancelling a
+  non-streaming call does not stop the provider's billing — so the worst case
+  is bounded by the attempt count and the per-phase timeouts instead: roughly
+  two and a half minutes, absent a response that trickles bytes.
 
 ---
 
@@ -149,6 +165,12 @@ LLM_TIMEOUT_SECONDS=30
 
 LLM_BASE_URL selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving LLM_BASE_URL empty switches back to the direct path and requires the native id.
 
+`LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases of one attempt.
+Each is a limit on silence within the phase, not on the length of the call —
+a response that keeps sending bytes can outlast it. Connection setup has its
+own fixed 5-second bound: a connection either completes quickly or not at
+all, and a request that never left is the cheapest one to retry.
+
 `EMBEDDING_DIMENSION` must match the vector column width defined in migration `005`; the application refuses to start if the loaded model disagrees. `LLM_API_KEY` is required at startup — a missing credential is a configuration error and should fail before the first request, not during it.
 
 Then bring the system up:
@@ -197,10 +219,12 @@ experiments of its own:
 `404` means no article answers to that id. `422` means the article exists but
 cannot be turned into facts: it has no abstract, the model declined it, or it
 is longer than the context window — a different article may work. `503` means
-the language model service was saturated or unreachable, so the same request
-may succeed later. `500` means the failure is on this side — a bad credential,
-a response the schema rejected, a bug — and there is nothing the caller can do
-differently.
+the language model service stayed saturated or unreachable through this
+service's own retries — up to three attempts, waiting as long as the provider
+asks up to a minute — so the same request may succeed later. Because of those
+retries, a `503` can take far longer to arrive than a success. `500` means the
+failure is on this side — a bad credential, a response the schema rejected, a
+bug — and there is nothing the caller can do differently.
 
 Both search endpoints return a paginated envelope of `RetrievalResult` objects:
 
@@ -256,7 +280,9 @@ pytest --collect-only -q  # verify every test is actually collected
 
 - **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure.
 - **Separate database:** Tests never touch the working corpus. A behavioural guard refuses to run if the target database holds more articles than a test database plausibly would.
-- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.
+- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.Time is a dependency too: the retry layer's sleep and random draw are
+injected, and its tests replace the sleep with a recorder, so every wait is
+asserted without waiting.
 - **Mutation-calibrated:** Every test was validated by deliberately breaking the decision it claims to protect and confirming the test fails. A green suite is evidence only after this step.
 
 ---

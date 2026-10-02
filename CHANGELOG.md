@@ -157,6 +157,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route on the articles router. Each installs a recording double at the service
   dependency and asserts which method the request reached, because the status
   code cannot tell a correct route from a misrouted one
+- `app/core/retry.py`: the retry layer. `Retrier.run` takes a factory for
+  the provider call — a coroutine can be awaited only once, so each attempt
+  needs a new one — and retries while the failure's category is
+  `UPSTREAM_UNAVAILABLE`. `plan_retry` and `backoff_delay` hold the policy as
+  pure functions; the wait and the random draw are injected, so tests observe
+  every wait without waiting. Each retry logs one `WARNING` in the same
+  `key=value` shape as the HTTP error handler, because a retry that ends in
+  success leaves no other trace that the upstream faltered
+- `LLMError.retry_after` and `parse_retry_after`: the provider's requested
+  wait crosses the client boundary as seconds, read from `retry-after-ms`
+  first and `retry-after` second. Only numbers are read; a value that is
+  negative, not finite or a date counts as absent
+- `FakeLLMClient(outcomes=[...])` plays back a script of completions and
+  exceptions, one per call. A call past the end of the script fails the
+  test, so an unplanned extra attempt cannot pass unseen
+- Tests: the factory's `max_retries=0` and phase timeouts, pinned on both the
+  gateway and the direct path; `complete()`'s single provider call, pinned on
+  every retryable branch (429, 503, 529, a refused connection, a read
+  timeout); `Retry-After` parsing and its arrival on the error; the retry
+  policy and loop (`test_retry.py`); both service methods retrying through
+  the retrier they ship with. The suite stands at 122 tests
 
 ### Changed
 
@@ -240,6 +261,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release side instead of the acquisition side. The wrapper keeps its own
   `aclose()` name: the `a` prefix marks a coroutine for this project's
   callers and does not have to match what the wrapped SDK calls it
+  - `create_llm_client` builds an `httpx.Timeout` instead of passing one float.
+  The float set all four phases to 30s and lifted the connect bound from the
+  SDK's 5s; connection setup now has its own 5s bound, and
+  `LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases. Its meaning
+  narrowed with it — an idle limit per phase, not a limit on the call — and
+  the comments in `config.py` and `.env.example` say so
+- `GenerationService` runs both provider calls through a `Retrier` it
+  constructs itself. Only the provider call is retried: the record is read
+  and the prompt rendered once, so every attempt repeats the same request
+- `LLMError.log_context()` includes `retry_after` only when the provider sent
+  one. An unconditional key would put `retry_after=None` on every error line,
+  and the existing tests compare the context whole, so they hold that shape
   
 ### Decisions
 
@@ -618,14 +651,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a larger prompt buys a larger bill rather than a slower call. The
   earlier 6.5x gap between arms was an artefact of the blocked design and
   did not survive interleaving
-- **Observed latency spans 1.43s to 12.34s** across all sessions for the
-  same model and the same call. The 12.34s outlier was never reproduced
-  and its cause is unknown; gateway-side load or provider selection is
-  presumed. Recorded because Step 8's timeout threshold is a tail
-  decision: the tail lives in this record, not in any single run's
-  maximum, because a ten-call run in calm conditions reports a calm
-  maximum. A threshold set from the ~1.8s median would have killed the
-  12.34s call and billed the retry
+  - **The 12.34s figure was an arm mean, not a call.** It came from a blocked
+  run in which one arm of ten averaged 12.34s and the same configuration,
+  re-run, averaged 1.65s; an earlier entry recorded it as a single call. The
+  longest single call has not been recorded anywhere, which is why the
+  timeout values are borrowed rather than set from the tail: a ten-call run
+  in calm conditions reports a calm maximum, and the tail will come from
+  per-attempt records rather than from any one run
+- **A timeout bounds silence, not the call.** Over a real socket, with the
+  client's float timeout set to 2s: a response that sent one byte per second
+  for six seconds returned `200` after 6.04s; headers at 1.5s and the body
+  1.5s later returned `200` after 3.01s; a single 2.6s silence raised a read
+  timeout at 2.01s. Even without a trickle, headers and body are separate
+  reads, so one attempt can last close to twice the bound
 - **Multi-block responses did not materialise on this path.** Both arms
   returned a single `text` block, so `to_completion` finds the payload
   and the concern that a structured response might arrive in a
@@ -672,6 +710,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as `/search?q=`, because `/` is a separator in a path and a value in a query
   string. `limit` and `offset` settle it independently — both carry defaults,
   and a path parameter cannot be omitted
+- **One retry layer, owned by the service's call site.** The loop lives in
+  `app/core/retry.py`; the service wraps only the provider call. Rejected: a
+  loop inside `complete()`, which would break the single-call invariant the
+  attempt budget rests on; and a retrying wrapper installed in the lifespan,
+  whose one line of wiring no test runs and which would hide attempts from the
+  layer that will record their usage. Installed in the factory instead, it
+  would also change what `scripts/measure_json_compliance.py` measures.
+  Trigger for centralising: a second service that calls the provider
+- **The switched-off SDK policy, restored element by element.** Kept: three
+  attempts, a 0.5s base doubling per retry, a wait trimmed by at most a
+  quarter (a 75% floor suits a single caller better than full jitter, which
+  can fall to zero), and `Retry-After` honoured up to 60s. Changed: a longer
+  `Retry-After` ends the retrying, where the SDK falls back to its own backoff
+  and tries sooner than asked; the gateway's documentation asks for the header
+  to be honoured. Dropped: retrying 408 and 409, which the error taxonomy
+  classifies as internal; `x-should-retry`, not observed through the gateway;
+  and the 8s cap, which three attempts never reach. Every value is borrowed
+  from the SDK, not measured here; per-attempt records will be the first data
+  to tune them
+- **A request that timed out is retried.** The provider may already have
+  billed it — the gateway documents that cancelling a non-streaming request
+  still bills the full response — but `max_tokens` caps that cost at about
+  $0.003 per attempt at the provider's list price, the gateway's margin
+  excluded. The decision holds only while the read bound sits well above the
+  longest generation `max_tokens` allows; otherwise a slow input times out on
+  every attempt, and retrying pays three times for nothing. Trigger: a larger
+  `max_tokens`, or records showing one request timing out on every attempt
+- **No deadline on the whole request.** A hard deadline cancels an attempt in
+  flight, and on this path cancellation saves no money and throws away a
+  result already paid for; the trickling response it would bound has not been
+  observed. A soft budget — no new wait or attempt once time runs short — is
+  deferred, because its value depends on whether a retry after a timeout ever
+  succeeds, and nothing has measured that. The rule is written before the
+  data: if retried requests outlast one attempt's ceiling of about 35s, set
+  the budget to about 60s when retries after a timeout rarely succeed, which
+  allows none, or to at least 66s when they do, which allows one. Until then
+  the worst case is about 107s through timeouts and about 157s through two
+  maximal `Retry-After` waits, absent a trickling response
+- **The service builds its own retrier.** A constructor parameter was
+  planned so tests could inject a fake sleep. A zero `Retry-After` makes the
+  shipped retrier retry at once, so the tests exercise the wiring as it ships
+  and the parameter would have no consumer. Trigger: a caller that needs a
+  different policy, such as a background worker
+- **The retry layer is typed to `LLMError`.** It is the only error that can
+  be `UPSTREAM_UNAVAILABLE` and the only one with a `retry_after`; a loop
+  typed to `AppError` would need `getattr` on a field the base type does not
+  declare. Trigger: a second error type that can be `UPSTREAM_UNAVAILABLE`
+- **Retries do not fire the streaming trigger.** Its first condition names
+  several sequential calls per request, meaning a pipeline of different calls
+  whose latencies add up for a waiting reader. A retry repeats one call, and
+  streaming a failed attempt gains nothing. Its second condition says
+  *regularly*, and retries are the exception
 
 ### Known gaps
 
@@ -684,12 +774,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that was named as the blocker now exists in `tests/test_llm_client.py`, so
   the cost of closing this is a handler that records the outgoing request body
   rather than new infrastructure
-- `create_llm_client` passes `max_retries=0` and nothing pins it. Left at the
-  SDK default of 2, it would multiply with any retry budget layered above the
-  client: a three-attempt budget becomes nine billed calls. The translation
-  tests set the value themselves, so they pin their own setup rather than the
-  factory's. Reassessed in Step 8, when a retry budget gives the invariant a
-  live consumer
 - The `log_level` half of `_CATEGORY_CONFIG` has no test. Changing a category's
   level breaks nothing, and the levels carry a real decision — `NOT_FOUND` logs
   at `INFO` precisely because it is not a malfunction. Reassessed in v6, when
@@ -701,6 +785,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/articles/search` path, which is a public contract. Reassessed in v5: hybrid
   search forces all three to be named at once, and a path change belongs on a
   version boundary
+  - A caller that gives up does not stop the attempts. At the ASGI level a
+  handler runs to completion after the client disconnects, so retries go on,
+  billed, for a reader who has left, and nothing inside the service can see
+  it. `httpx`'s own default timeout is 5s, so the first Python client written
+  with defaults carries a deadline this service cannot observe. Reassessed
+  when a caller declares a deadline
+- A gateway error sent inside a `200` raises `TypeError` in `to_completion`.
+  It is unclassified, surfaces as `500`, and is not retried: the retry layer
+  reads only categories, and this failure has none. Whether it is transient,
+  and so worth retrying, is unknown until it is classified. Documented and
+  simulated, not observed live; reassessed on first sighting
+- `summarize_article`'s own guards — the not-found check and
+  `_require_completed` — are pinned only through `extract_facts`; removing
+  either from `summarize_article` breaks no test. The method has no consumer
+  yet; reassessed when one appears
+- `Retry-After` in its HTTP-date form is read as absent, and the retry falls
+  back to the backoff. Reassessed if a date-form header is ever observed
+- A response that keeps trickling bytes is not bounded: every phase timeout
+  measures silence, and there is no deadline. Reassessed when per-attempt
+  records show an attempt outlasting connect plus read
 
 ---
 
