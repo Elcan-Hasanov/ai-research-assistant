@@ -106,11 +106,20 @@ def test_plan_retry_honours_a_retry_after_up_to_the_limit(retry_after, expected)
         (_error(401), 1),
         (_error(413), 1),
         (_error(529), MAX_ATTEMPTS),
+        (_error(429, retry_after=30.0), MAX_ATTEMPTS),
+        (_error(413, retry_after=30.0), 1),
     ],
-    ids=["internal", "unusable-source", "budget-spent"],
+    ids=[
+        "internal",
+        "unusable-source",
+        "budget-spent",
+        "budget-spent-despite-retry-after",
+        "unusable-source-despite-retry-after",
+    ],
 )
 def test_plan_retry_gives_up(error, failed_attempt):
-    """The upstream cannot fix the failure, or the budget is spent: either way there is nothing to wait for."""
+    """The upstream cannot fix the failure, or the budget is spent: either way
+    there is nothing to wait for, even when the provider names a wait."""
     assert plan_retry(error, failed_attempt, 0.0) is None
 
 

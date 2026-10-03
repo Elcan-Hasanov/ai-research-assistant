@@ -175,9 +175,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the factory's `max_retries=0` and phase timeouts, pinned on both the
   gateway and the direct path; `complete()`'s single provider call, pinned on
   every retryable branch (429, 503, 529, a refused connection, a read
-  timeout); `Retry-After` parsing and its arrival on the error; the retry
-  policy and loop (`test_retry.py`); both service methods retrying through
-  the retrier they ship with. The suite stands at 122 tests
+  timeout); `Retry-After` parsing and its arrival on the error; the retry policy
+  and loop (test_retry.py), including the order of its checks: a Retry-After overrides
+  neither the attempt budget nor the category; both service methods retrying through
+  the retrier they ship with. The suite stands at 124 tests
 
 ### Changed
 
