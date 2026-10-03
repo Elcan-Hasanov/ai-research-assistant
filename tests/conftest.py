@@ -150,7 +150,7 @@ class FakeLLMClient:
     signature must track the real one. If it drifts, a service that calls the
     real client will fail against the fake and the fake stops being evidence.
 
-    It records the arguments of the last call: a canned response cannot show
+    It records the arguments of every call: a canned response cannot show
     whether the service rendered the right prompt, mapped the right columns,
     or passed the schema at all.
 

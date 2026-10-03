@@ -142,7 +142,7 @@ def _client_for(handler) -> tuple[LLMClient, list[httpx.Request]]:
 
     max_retries is set here so that a call count of one means "complete()
     called the provider once" rather than "the SDK happened not to retry".
-    It does not pin the factory's own setting — nothing does.
+    It does not pin the factory's own setting; the factory_built_client tests do.
     """
     sent: list[httpx.Request] = []
 

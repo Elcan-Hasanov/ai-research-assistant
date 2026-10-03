@@ -72,7 +72,7 @@ class Retrier:
         """Return what call() returns, retrying while the policy allows.
 
         call is invoked once per attempt and must build a new awaitable each
-        time, as a lambda around the client call does. A coroutine createds
+        time, as a lambda around the client call does. A coroutine created
         once and handed back on every attempt fails on the first retry: a
         coroutine can be awaited only once. When the policy gives up, the
         last error is re-raised unchanged.
