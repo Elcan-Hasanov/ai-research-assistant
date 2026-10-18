@@ -176,6 +176,7 @@ class FakeLLMClient:
             input_tokens=10,
             output_tokens=5,
             model="fake/test-llm",
+            elapsed_seconds=1.0,
         )
         self._outcomes = None if outcomes is None else list(outcomes)
         self.calls: list[dict[str, Any]] = []

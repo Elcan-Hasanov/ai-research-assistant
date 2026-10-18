@@ -20,6 +20,7 @@ DONE = LLMCompletion(
     input_tokens=1,
     output_tokens=1,
     model="fake/test-llm",
+    elapsed_seconds=1.0,
 )
 
 
@@ -47,14 +48,14 @@ async def test_a_retryable_failure_is_retried_after_the_backoff():
     """One overloaded attempt, then a success: the loop waits the first
     backoff and returns what the second attempt produced."""
     client = FakeLLMClient(outcomes=[_error(529), DONE])
-    clock = FakeSleep()
-    retrier = Retrier(sleep=clock.sleep, fraction=lambda: 0.0)
+    fake_sleep = FakeSleep()
+    retrier = Retrier(sleep=fake_sleep.sleep, fraction=lambda: 0.0)
 
     result = await retrier.run(lambda: client.complete(MESSAGES, max_tokens=10))
 
     assert result is DONE
     assert len(client.calls) == 2
-    assert clock.waits == [0.5]
+    assert fake_sleep.waits == [0.5]
 
 
 async def test_each_retry_leaves_a_warning(caplog):
@@ -127,40 +128,40 @@ async def test_the_last_error_is_raised_unchanged_when_attempts_run_out():
     """When the budget runs out, the caller gets the last attempt's own error, not a new one."""
     outcomes = [_error(529), _error(503), _error(429)]
     client = FakeLLMClient(outcomes=outcomes)
-    clock = FakeSleep()
-    retrier = Retrier(sleep=clock.sleep, fraction=lambda: 0.0)
+    fake_sleep = FakeSleep()
+    retrier = Retrier(sleep=fake_sleep.sleep, fraction=lambda: 0.0)
 
     with pytest.raises(LLMError) as caught:
         await retrier.run(lambda: client.complete(MESSAGES, max_tokens=10))
 
     assert caught.value is outcomes[-1]
     assert len(client.calls) == 3
-    assert clock.waits == [0.5, 1.0]
+    assert fake_sleep.waits == [0.5, 1.0]
 
 
 async def test_a_non_retryable_failure_is_raised_on_the_first_attempt():
     """A failure the upstream cannot fix leaves on the attempt that produced it, without a wait."""
     outcomes = [_error(401)]
     client = FakeLLMClient(outcomes=outcomes)
-    clock = FakeSleep()
-    retrier = Retrier(sleep=clock.sleep, fraction=lambda: 0.0)
+    fake_sleep = FakeSleep()
+    retrier = Retrier(sleep=fake_sleep.sleep, fraction=lambda: 0.0)
 
     with pytest.raises(LLMError):
         await retrier.run(lambda: client.complete(MESSAGES, max_tokens=10))
 
     assert len(client.calls) == 1
-    assert clock.waits == []
+    assert fake_sleep.waits == []
 
 
 async def test_an_error_that_is_not_an_llm_error_is_not_retried():
     """Only LLMError carries a category to read; anything else goes straight out on the first attempt."""
     outcomes = [TypeError("malformed response")]
     client = FakeLLMClient(outcomes=outcomes)
-    clock = FakeSleep()
-    retrier = Retrier(sleep=clock.sleep, fraction=lambda: 0.0)
+    fake_sleep = FakeSleep()
+    retrier = Retrier(sleep=fake_sleep.sleep, fraction=lambda: 0.0)
 
     with pytest.raises(TypeError):
         await retrier.run(lambda: client.complete(MESSAGES, max_tokens=10))
 
     assert len(client.calls) == 1
-    assert clock.waits == []
+    assert fake_sleep.waits == []

@@ -19,6 +19,7 @@ BEFORE RUNNING: write down your prediction for every marker below.
 
 import json
 import logging
+import time
 
 import anthropic
 from anthropic import Anthropic
@@ -63,8 +64,8 @@ SCHEMA = {
 }
 
 
-def report(response, label: str) -> None:
-    """Expose the whole response, then the five fields that cross the boundary."""
+def report(response, elapsed_seconds: float, label: str) -> None:
+    """Expose the whole response, then what to_completion makes of it."""
     print("\n" + SEPARATOR)
     print(label)
     print(SEPARATOR)
@@ -75,7 +76,7 @@ def report(response, label: str) -> None:
     print("  stop_details: ", getattr(response, "stop_details", None))
     print("  tokens      : ", response.usage.input_tokens, "->", response.usage.output_tokens)
 
-    completion = to_completion(response)
+    completion = to_completion(response, elapsed_seconds=elapsed_seconds)
     print("  to_completion().stop        : ", completion.stop)
     print("  to_completion().text length : ", len(completion.text))
     print("\n--- text, verbatim ---")
@@ -118,7 +119,9 @@ def main() -> int:
         payload["system"] = prompt.system
 
     try:
-        report(client.messages.create(**payload), "CALL 1 - PROMPT ONLY   P1")
+        started = time.perf_counter()
+        response = client.messages.create(**payload)
+        report(response, time.perf_counter() - started, "CALL 1 - PROMPT ONLY   P1")
     except anthropic.APIError as exc:
         logger.error("Call 1 failed: %s (status=%s)",
                      type(exc).__name__, getattr(exc, "status_code", "n/a"))
@@ -128,10 +131,12 @@ def main() -> int:
     print("CALL 2 - WITH output_config   P2 P3")
     print(SEPARATOR)
     try:
+        started = time.perf_counter()
         constrained = client.messages.create(
             **payload,
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
         )
+        elapsed = time.perf_counter() - started
     except anthropic.APIError as exc:
         # Only the type and status. SDK errors can echo the request body,
         # and that body holds the prompt.
@@ -140,7 +145,7 @@ def main() -> int:
         print("\n" + SEPARATOR + "\n")
         return 0
 
-    report(constrained, "CALL 2 - WITH output_config   P2 P3")
+    report(constrained, elapsed, "CALL 2 - WITH output_config   P2 P3")
     print("\n" + SEPARATOR + "\n")
     return 0
 

@@ -53,6 +53,7 @@ def completed(text: str) -> LLMCompletion:
         input_tokens=247,
         output_tokens=88,
         model="fake/test-llm",
+        elapsed_seconds=1.76,
     )
 
 
@@ -64,6 +65,7 @@ def truncated(text: str) -> LLMCompletion:
         input_tokens=247,
         output_tokens=500,
         model="fake/test-llm",
+        elapsed_seconds=1.76,
     )
 
 

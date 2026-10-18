@@ -1,3 +1,6 @@
+import math
+import time
+
 import anthropic
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
@@ -12,7 +15,8 @@ from app.core.llm import (
     LLMError,
     create_llm_client,
     to_completion,
-    parse_retry_after
+    parse_retry_after,
+    parse_reported_cost
 )
 
 
@@ -34,10 +38,14 @@ RAW = {
     },
 }
 
+# The translation tests pin what is read from the response; the duration
+# only has to be present, so they all pass the same one.
+ELAPSED_SECONDS = 1.0
+
 
 def test_to_completion_parses_normal_response():
     message = Message.model_validate(RAW)
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.model == "anthropic/claude-haiku-4.5"
     assert result.input_tokens == 18
@@ -48,7 +56,7 @@ def test_to_completion_parses_normal_response():
 
 def test_to_completion_handles_truncated_response():
     message = Message.model_validate({**RAW, "stop_reason": "max_tokens"})
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.stop == CompletionStop.TRUNCATED
 
@@ -62,7 +70,7 @@ def test_to_completion_joins_multiple_text_blocks():
         ],
     }
     message = Message.model_validate(payload)
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.text == "First part. Second part."
 
@@ -77,7 +85,7 @@ def test_to_completion_ignores_non_text_blocks():
     }
     # model_construct bypasses SDK's strict block structure validation
     message = Message.model_construct(**payload)
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.text == "Actual answer."
 
@@ -85,7 +93,7 @@ def test_to_completion_ignores_non_text_blocks():
 def test_to_completion_handles_unknown_stop_reason():
     # model_construct bypasses SDK's Literal enum validation for stop_reason
     message = Message.model_construct(**{**RAW, "stop_reason": "something_unexpected"})
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.stop == CompletionStop.UNKNOWN
 
@@ -93,7 +101,7 @@ def test_to_completion_maps_refusal():
     # "refusal" is inside the SDK's stop_reason Literal, so model_validate
     # works and the SDK's own validation runs as part of the test.
     message = Message.model_validate({**RAW, "stop_reason": "refusal"})
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.stop == CompletionStop.REFUSED
 
@@ -102,7 +110,7 @@ def test_to_completion_maps_context_window_overflow():
     message = Message.model_validate(
         {**RAW, "stop_reason": "model_context_window_exceeded"}
     )
-    result = to_completion(message)
+    result = to_completion(message, elapsed_seconds=ELAPSED_SECONDS)
 
     assert result.stop == CompletionStop.CONTEXT_OVERFLOW
 
@@ -137,12 +145,15 @@ def _responding(status_code: int, error_type: str, headers: dict[str, str] | Non
     return handler
 
 
-def _client_for(handler) -> tuple[LLMClient, list[httpx.Request]]:
+def _client_for(handler, *, clock=time.perf_counter) -> tuple[LLMClient, list[httpx.Request]]:
     """A real LLMClient over a real AsyncAnthropic whose socket is faked.
 
     max_retries is set here so that a call count of one means "complete()
     called the provider once" rather than "the SDK happened not to retry".
     It does not pin the factory's own setting; the factory_built_client tests do.
+
+    The clock is the production one unless a test that pins a duration
+    passes its own.
     """
     sent: list[httpx.Request] = []
 
@@ -155,7 +166,7 @@ def _client_for(handler) -> tuple[LLMClient, list[httpx.Request]]:
         max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(recording)),
     )
-    return LLMClient(sdk_client, "fake/test-llm"), sent
+    return LLMClient(sdk_client, "fake/test-llm", clock=clock), sent
 
 
 async def test_rate_limit_is_translated_and_carries_the_status():
@@ -325,4 +336,114 @@ async def test_factory_uses_layered_timeouts(factory_built_client):
 )
 def test_retry_after_is_read_as_seconds(headers, expected):
     actual = parse_retry_after(httpx.Headers(headers))
+    assert actual == expected
+
+
+# ============================================================================
+# What complete() measures, and the cost it carries. The SDK is real here too;
+# only the socket and, where a test pins a duration, the clock are fake.
+# ============================================================================
+
+class FakeClock:
+    """Hands out the readings it was given, one per read.
+
+    A read past the end of the script fails the test, so an extra reading
+    cannot shift the measured interval unseen.
+    """
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+
+    def read(self) -> float:
+        """The next scripted reading."""
+        if not self._readings:
+            raise AssertionError("FakeClock: a read was not in the script")
+        return self._readings.pop(0)
+
+
+def _succeeding(body: dict):
+    """A transport handler that answers every request with one successful response."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+    return handler
+
+
+async def test_complete_reports_how_long_the_call_took():
+    """The duration is the time between the two clock readings around the provider call."""
+    client, _ = _client_for(_succeeding(RAW), clock=FakeClock(1.0, 3.5).read)
+
+    try:
+        completion = await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert completion.elapsed_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        _responding(529, "overloaded_error"),
+        _raising(httpx.ReadTimeout),
+    ],
+    ids=["status-error", "read-timeout"],
+)
+async def test_a_failed_call_reports_how_long_it_took(handler):
+    """A failed attempt is timed as well: a timed-out attempt never gets a
+    response, and its duration is what the timeout rules are judged on."""
+    client, _ = _client_for(handler, clock=FakeClock(1.0, 3.5).read)
+
+    try:
+        with pytest.raises(LLMError) as caught:
+            await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert caught.value.elapsed_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({**RAW, "usage": {**RAW["usage"], "cost": 0.00153}}, 0.00153),
+        (RAW, None),
+        ({**RAW, "usage": {**RAW["usage"], "cost": -0.5}}, None),
+    ],
+    ids=["reported", "absent", "negative"],
+)
+async def test_complete_keeps_the_reported_cost_only_when_usable(body, expected):
+    """A response's cost reaches the completion only when it is usable.
+
+    The gateway's cost is a field the SDK does not declare; it arrives only
+    because the SDK keeps such fields. A response without one must still
+    complete, and an unusable one must not be stored as if the gateway had
+    charged it.
+    """
+    client, _ = _client_for(_succeeding(body))
+
+    try:
+        completion = await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    assert completion.reported_cost_usd == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (7.43, 7.43),
+        (0, 0.0),
+        (None, None),
+        (True, None),
+        ("abc", None),
+        (-42, None),
+        (math.inf, None),
+        (10**400, None),
+    ],
+    ids=["dollars", "free", "absent", "boolean", "string", "negative", "infinite", "too-large"],
+)
+def test_a_raw_cost_is_read_as_dollars_or_none(value, expected):
+    actual = parse_reported_cost(value)
+
     assert actual == expected

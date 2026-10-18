@@ -1,16 +1,19 @@
 import logging
+import math
+import time
+
+from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
 import anthropic
 import httpx
-import math
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
 from pydantic import BaseModel
 
 from app.core.config import get_settings
-from app.core.errors import FailureCategory, AppError
+from app.core.errors import AppError, FailureCategory
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,11 @@ class LLMCompletion(BaseModel):
     input_tokens: int
     output_tokens: int
     model: str
+    elapsed_seconds: float
+
+    # What the gateway says it charged for this call.
+    # The direct path never sends it, so None means unknown, not free.
+    reported_cost_usd: float | None = None
 
 
 # Provider status code on the left, our classification on the right. Three
@@ -97,6 +105,7 @@ class LLMError(AppError):
         status_code: int | None = None,
         provider_error: str | None = None,
         retry_after: float | None = None,
+        elapsed_seconds: float | None = None,
     ) -> None:
         category = _categorise_status(status_code)
         super().__init__(
@@ -107,6 +116,7 @@ class LLMError(AppError):
         self.status_code = status_code
         self.provider_error = provider_error
         self.retry_after = retry_after
+        self.elapsed_seconds = elapsed_seconds
 
     def log_context(self) -> dict[str, object]:
         context: dict[str, object] = {"status": self.status_code, "provider": self.provider_error}
@@ -115,26 +125,74 @@ class LLMError(AppError):
         return context
 
 
-def to_completion(message: Message) -> LLMCompletion:
-    """Translate an SDK response object into this project's completion type."""
+def to_completion(message: Message, *, elapsed_seconds: float) -> LLMCompletion:
+    """Translate an SDK response and the call's duration into this project's completion type."""
+
     text = "".join(
         block.text for block in message.content if block.type == "text"
     )
+
     return LLMCompletion(
         text=text,
-        stop=_STOP_REASONS.get(message.stop_reason, CompletionStop.UNKNOWN),
+        stop=_STOP_REASONS.get(
+            message.stop_reason,
+            CompletionStop.UNKNOWN,
+        ),
         input_tokens=message.usage.input_tokens,
         output_tokens=message.usage.output_tokens,
         model=message.model,
+        elapsed_seconds=elapsed_seconds,
+        # The SDK keeps fields it does not declare, so the gateway's cost is
+        # still on the object; on the direct path the attribute is absent.
+        reported_cost_usd=parse_reported_cost(getattr(message.usage, "cost", None)),
     )
+
+
+def parse_reported_cost(value: object) -> float | None:
+    """The charge the gateway reported for one call, in US dollars.
+
+    None when the value is not a usable price: absent, not a number, negative
+    or not finite. It never raises: a malformed accounting field must not fail
+    a call that has already succeeded and been paid for.
+    """
+    # An exact type check: bool is a subclass of int, and a JSON true is not
+    # a price.
+    if type(value) not in (int, float):
+        return None
+
+    try:
+        number = float(value)
+    except OverflowError:
+        # JSON integers have no size limit; one too large for a float is not
+        # a price either.
+        return None
+
+    if not math.isfinite(number):
+        return None
+
+    if number < 0:
+        return None
+
+    return number
 
 
 class LLMClient:
     """The single place in this application that talks to the LLM SDK."""
 
-    def __init__(self, client: AsyncAnthropic, default_model: str) -> None:
+    def __init__(
+        self,
+        client: AsyncAnthropic,
+        default_model: str,
+        *,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
         self._client = client
         self._default_model = default_model
+
+        # Only the difference between two readings is used, so the clock
+        # must never step backwards: perf_counter is monotonic,
+        # time.time is not.
+        self._clock = clock
 
     async def complete(
         self,
@@ -157,9 +215,10 @@ class LLMClient:
                 way.
 
         Raises:
-            LLMError: The provider call failed. Carries the HTTP status and the
-                provider exception's type name as data, so callers can classify
-                without importing the SDK.
+            LLMError: The provider call failed. Carries the HTTP status,
+                the provider exception's type name and how long the call took
+                as data, so callers can classify and record it without
+                importing the SDK.
         """
         payload: dict[str, Any] = {
             "model": model or self._default_model,
@@ -180,9 +239,12 @@ class LLMClient:
                 }
             }
 
+        started = self._clock()
         try:
             message = await self._client.messages.create(**payload)
         except anthropic.APIError as exc:
+            elapsed_seconds = self._clock() - started
+
             # Only status errors carry a response; a connection failure or a
             # timeout never got one, so there is no header to read.
             retry_after = (
@@ -197,9 +259,11 @@ class LLMClient:
                 status_code=getattr(exc, "status_code", None),
                 provider_error=type(exc).__name__,
                 retry_after=retry_after,
+                elapsed_seconds=elapsed_seconds,
             ) from exc
 
-        return to_completion(message)
+        elapsed_seconds = self._clock() - started
+        return to_completion(message, elapsed_seconds=elapsed_seconds)
 
     async def aclose(self) -> None:
         """Close the underlying AsyncAnthropic client connection pool."""
