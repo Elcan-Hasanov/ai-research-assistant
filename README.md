@@ -21,7 +21,8 @@ FastAPI Router          HTTP concerns only — params, status codes
   ▼
 Service Layer           Retrieval and generation orchestration; query
   │                     encoding, distance → score conversion, prompt
-  │                     rendering, stop-reason diagnosis, contract mapping
+  │                     rendering, stop-reason diagnosis, contract mapping,
+  │                     recording every provider attempt
   ▼
 Repository Layer        Raw SQL only — no ranking policy, no HTTP
   │
@@ -32,7 +33,8 @@ PostgreSQL + pgvector   Lexical index (GIN) and vector index (HNSW)
 ```text
 app/
 ├── api/              Routers and the composition root for request-scoped wiring
-├── core/             Config, database pool, embedding model, lifespan, error handlers
+├── core/             Config, database pool, embedding model, LLM client, retry policy,
+│                     attempt records, lifespan, error handlers
 ├── generation/       LLM output contracts — response schemas, parsing, validation
 ├── prompts/          Versioned prompt templates and the loader that renders them
 ├── repositories/     Data access — raw SQL via asyncpg
@@ -101,7 +103,25 @@ evaluation/           Retrieval evaluation set and findings
   slow answer. There is no deadline on the whole request — cancelling a
   non-streaming call does not stop the provider's billing — so the worst case
   is bounded by the attempt count and the per-phase timeouts instead: roughly
-  two and a half minutes, absent a response that trickles bytes.
+  two and a half minutes, absent a response that trickles bytes. Adding one
+  would also mean recording cancelled attempts, which the usage records do
+  not cover today: a cancelled attempt may still have been billed.
+- **Every provider attempt is recorded, not every request.** A retried
+  request makes several attempts and any of them may have been billed, so
+  `llm_attempts` holds one row per attempt, keyed by a request id the service
+  generates and the attempt's number. One table serves the three ways an
+  attempt can end — a response, a translated provider error, an unclassified
+  exception — and an empty column means unknown or not applicable, with the
+  outcome saying which: a failed attempt's tokens are unknown, not zero. The
+  attempts of a request are written together, once, when it ends, whether it
+  succeeded or not. A single `executemany` is all-or-nothing, so a request is
+  never half recorded, and the primary key refuses a second write of the same
+  request's attempts instead of counting their cost twice. Recording never
+  changes the outcome: if the write fails, the caller still gets what the
+  provider produced, and the records go to an `ERROR` log line, where the
+  loss is visible rather than silent. Cost is the figure the gateway reports
+  for each call; the direct path reports none, so there it is left empty
+  rather than estimated.
 
 ---
 
@@ -163,7 +183,7 @@ LLM_MODEL="anthropic/claude-haiku-4.5"
 LLM_TIMEOUT_SECONDS=30
 ```
 
-LLM_BASE_URL selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving LLM_BASE_URL empty switches back to the direct path and requires the native id.
+`LLM_BASE_URL` selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving `LLM_BASE_URL` empty switches back to the direct path and requires the native id. The paths also differ in what they report: only the gateway says what a call cost, so on the direct path the usage records keep their token counts but leave the cost empty.
 
 `LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases of one attempt.
 Each is a limit on silence within the phase, not on the length of the call —
@@ -182,6 +202,8 @@ python -m scripts.ingest_arxiv --categories cs.AI cs.CL cs.LG --target 5000
 python -m scripts.backfill_embeddings    # add --dry-run to preview
 uvicorn app.main:app --reload
 ```
+
+Apply schema changes only through `scripts.migrate`. The runner is idempotent because it records each file in `schema_migrations` in the same transaction that applies it; the SQL files themselves are not, and several fail on a second run. A file run by hand, from a SQL console for example, changes the schema without telling the ledger, and the runner's next run then fails trying to apply it again.
 
 Ingestion is idempotent (`ON CONFLICT DO UPDATE`), so cross-listed papers and repeated runs are handled without duplication. The backfill processes only articles without a current vector; its first run downloads the embedding model and may take several minutes. The application then runs at `http://127.0.0.1:8000`.
 
@@ -243,6 +265,33 @@ Both search endpoints return a paginated envelope of `RetrievalResult` objects:
 
 ---
 
+## Usage Accounting
+
+Every provider attempt leaves one row in `llm_attempts`: the request and
+attempt it belongs to, the prompt identifier, how it ended (`response`,
+`llm_error` or `unclassified`) and what is known about it — tokens, model,
+reported cost and duration for a response; status code, provider error type
+and requested wait for a failure. Nothing in the application reads the table
+yet; it is queried directly. How many attempts each request took, and what
+they are known to have cost:
+
+```sql
+SELECT request_id,
+       prompt_identifier,
+       count(*)                 AS attempts,
+       count(reported_cost_usd) AS priced_attempts,
+       sum(reported_cost_usd)   AS known_cost_usd
+FROM llm_attempts
+GROUP BY request_id, prompt_identifier
+ORDER BY min(created_at) DESC;
+```
+
+`known_cost_usd` is a lower bound whenever `priced_attempts` is smaller than
+`attempts`: a failed attempt's cost is unknown, and it may still have been
+billed. On the direct path no cost is reported, and the column stays empty.
+
+---
+
 ## Testing
 
 The suite targets the surfaces where a wrong answer is **silent** — a swapped
@@ -272,17 +321,13 @@ pytest -m "not db"        # deselect the database-backed tests
 pytest --collect-only -q  # verify every test is actually collected
 ```
 
--m "not db" deselects the tests that query PostgreSQL, but it does not currently let the suite run without one: a session-scoped readiness fixture connects before selection happens, so any subset still requires arxiv_test to exist. Making that fixture marker-aware is open work.
+`-m "not db"` deselects the tests that query PostgreSQL, but it does not currently let the suite run without one: a session-scoped readiness fixture connects before selection happens, so any subset still requires `arxiv_test` to exist. Making that fixture marker-aware is open work.
 
 ### Design
 
-### Design
-
-- **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure.
+- **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure. One test is the deliberate exception: it checks that a batch the database refuses part-way commits none of its rows, which a transaction rolled back afterwards would hide, so it writes through its own pool and deletes its rows in a `finally` block.
 - **Separate database:** Tests never touch the working corpus. A behavioural guard refuses to run if the target database holds more articles than a test database plausibly would.
-- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one.Time is a dependency too: the retry layer's sleep and random draw are
-injected, and its tests replace the sleep with a recorder, so every wait is
-asserted without waiting.
+- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one. A usage store that refuses every write stands in for an unreachable database, so the fail-open path is tested without taking a real one down. Time is a dependency too: the retry layer's sleep and random draw are injected, and its tests replace the sleep with a recorder, so every wait is asserted without waiting.
 - **Mutation-calibrated:** Every test was validated by deliberately breaking the decision it claims to protect and confirming the test fails. A green suite is evidence only after this step.
 
 ---
@@ -300,7 +345,7 @@ These artefacts form the first version of the benchmark dataset that v6's evalua
 
 The `scripts/measure_*.py` family characterises the system rather than testing it: token-length distributions against the model's sequence limit, query-prefix impact on ranking, and HNSW recall versus latency across `ef_search` settings. `scripts/probe_llm.py` is a one-shot discovery probe for the LLM provider — it reports the SDK's default timeout and retry policy and dumps a raw response object, deliberately deriving no thresholds from a single sample.
 
-scripts/probe_structured.py does the same for structured output. scripts/measure_json_compliance.py is a measurement rather than a probe: it compares prompt-only instruction against a schema sent with the request over repeated calls on a fixed input, with the decision rule written before the run. Its two arms are interleaved rather than run in blocks — a blocked earlier version attributed a swing in gateway load to whichever arm happened to be running, and the causal claim built on it did not survive a second run.
+`scripts/probe_structured.py` does the same for structured output. `scripts/measure_json_compliance.py` is a measurement rather than a probe: it compares prompt-only instruction against a schema sent with the request over repeated calls on a fixed input, with the decision rule written before the run. Its two arms are interleaved rather than run in blocks — a blocked earlier version attributed a swing in gateway load to whichever arm happened to be running, and the causal claim built on it did not survive a second run.
 
 ---
 

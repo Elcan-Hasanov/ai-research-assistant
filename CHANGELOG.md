@@ -179,6 +179,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and loop (test_retry.py), including the order of its checks: a Retry-After overrides
   neither the attempt budget nor the category; both service methods retrying through
   the retrier they ship with. The suite stands at 124 tests
+- `LLMCompletion.elapsed_seconds` and `LLMError.elapsed_seconds`: every
+  provider call is timed inside `LLMClient.complete()`, on success and on
+  failure, with an injected clock that defaults to `time.perf_counter`. Only
+  the difference between two readings is used, so the clock must be
+  monotonic, which `time.time` is not
+- `LLMCompletion.reported_cost_usd` and `parse_reported_cost`: the cost the
+  gateway reports for a call, read from the SDK's undeclared `usage.cost`.
+  Anything that is not a usable price — absent, not a number, a boolean,
+  negative, not finite, too large for a float — becomes `None`, and parsing
+  never raises: a malformed accounting field must not fail a call that has
+  already succeeded and been paid for
+- `migrations/009_create_llm_attempts.sql`: the `llm_attempts` table, one row
+  per provider attempt, keyed by `(request_id, attempt)`
+- `app/core/usage.py`: `AttemptOutcome`, `AttemptRecord` and
+  `AttemptRecorder`. `observe` awaits one attempt, records how it ended and
+  passes its result or exception on unchanged. It persists nothing; the
+  service decides when and where
+- `app/repositories/usage_repository.py`: `UsageRepository.record_attempts`
+  writes one request's attempts with a single `executemany`. It only writes;
+  nothing reads the table yet
+- `get_usage_repository` in `app/api/dependencies.py`; `GenerationService`
+  takes the repository as its third argument
+- Tests: call timing and cost parsing in `tests/test_llm_client.py`; the
+  recorder in `tests/test_usage.py`; a column-by-column round trip and an
+  all-or-nothing batch in `tests/test_repository_usage.py`, with a
+  `usage_repository` fixture and a `recorded_attempts` helper in
+  `tests/conftest.py`; and four service tests for the recording itself — a
+  retried request under one id, attempts kept when the retries run out, each
+  call its own request, and a failed write that leaves the result standing
+  and logs the attempts. The suite stands at 148 tests
 
 ### Changed
 
@@ -244,11 +274,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, so the application holds two 404 mechanisms. Closed in a separate
   commit immediately after this one; the method has no test today, so pinning
   its current behaviour comes first
-  - The `api_client` fixture moved from `tests/test_error_mapping.py` to
+- The `api_client` fixture moved from `tests/test_error_mapping.py` to
   `tests/conftest.py`, now that a second file drives the app over HTTP. Its
   import of `app.main` is inside the fixture body rather than at module level:
   at module level every test run would pay the five seconds that reaching
   `sentence_transformers` costs, including the runs that never touch the app
+- `GenerationService` records every provider attempt. `_generate` gives each
+  call its own request id and recorder, runs the provider call through the
+  retrier with the recorder observing each attempt, and saves the attempts in
+  `finally`; `_save_attempts` turns a failed write into an `ERROR` log line
+  that carries the records. The public methods keep the decisions that belong
+  to each operation: finding the article, rendering the prompt, accepting the
+  completion and parsing it
+- `.env.example` notes that only the gateway reports cost, so attempts on the
+  direct path are recorded with `reported_cost_usd` empty
+- `scripts/probe_structured.py` times each call and passes the duration to
+  `to_completion`, which now requires it
+- The existing service tests take the `usage_repository` fixture, and the two
+  retry tests build their failures with the shared `unavailable()` helper
+- `tests/test_retry.py` names its sleep recorder `fake_sleep`, after what it
+  records, rather than `clock`
 
 ### Fixed
 
@@ -262,7 +307,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release side instead of the acquisition side. The wrapper keeps its own
   `aclose()` name: the `a` prefix marks a coroutine for this project's
   callers and does not have to match what the wrapped SDK calls it
-  - `create_llm_client` builds an `httpx.Timeout` instead of passing one float.
+- `create_llm_client` builds an `httpx.Timeout` instead of passing one float.
   The float set all four phases to 30s and lifted the connect bound from the
   SDK's 5s; connection setup now has its own 5s bound, and
   `LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases. Its meaning
@@ -274,7 +319,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `LLMError.log_context()` includes `retry_after` only when the provider sent
   one. An unconditional key would put `retry_after=None` on every error line,
   and the existing tests compare the context whole, so they hold that shape
-  
+
 ### Decisions
 
 - **Provider transport (measured, revisited):** the original choice was a
@@ -294,26 +339,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`claude-haiku-4-5-20251001`) returns `404`, and the gateway form
   (`anthropic/claude-haiku-4.5`) is required. Because model choice lives
   in configuration rather than in code, this was a one-line `.env` change
-- **Gateway `usage` is richer than the native contract and will not be
-  trusted.** Responses through the gateway carry `cost`, `cost_details`,
-  `provider`, and `speed` alongside the two fields the provider's own API
-  returns. Those extra fields disappear on the direct path, so the usage
-  accounting in Step 9 will compute cost from `input_tokens` /
-  `output_tokens` against our own price model rather than reading a
-  precomputed figure
+- **Gateway `usage` is richer than the native contract (revisited).**
+  Responses through the gateway carry `cost`, `cost_details`, `provider`,
+  and `speed` alongside the two fields the provider's own API returns. The
+  original decision was not to trust them, because they disappear on the
+  direct path, and to have Step 9 compute cost from `input_tokens` /
+  `output_tokens` against our own price model. Step 9 reversed it: each
+  attempt record keeps the cost the gateway reports, as
+  `reported_cost_usd`, and leaves it empty on the direct path. A price
+  model would be a second source of truth, maintained by hand and silently
+  wrong the first time a price changed, and it would only estimate a figure
+  the gateway already states for the call. The direct path loses nothing it
+  had: tokens are recorded on both paths, so a price model can still be
+  applied to any row later. The first live record matched list price
+  exactly (see Measurements). Trigger: a consumer that needs a cost on the
+  direct path, or a reported cost that disagrees with list price times the
+  recorded tokens
 - **SDK defaults confirmed against documentation, not inferred from one
   run.** Observed `max_retries=2` and a 600-second default timeout match
   the published SDK behaviour. The agreement matters: a single
   observation through a gateway could have reflected an overridden value,
   and Step 8's retry budget depends on knowing which of the two is true
-- **No SDK type crosses the boundary.** Five fields leave this module:
-  text, stop, `input_tokens`, `output_tokens`, and model. The gateway's
-  extra fields (`cost`, `provider`, `speed`, `service_tier`) are
-  deliberately dropped — they vanish on the direct path, so code reading
-  them would break silently the day direct access is restored. The
-  response `id` is also excluded; its format differs between the two
-  paths, and it gains a consumer only if Step 9's correlation work needs
-  a provider-side identifier. No `ABC` or `Protocol` is introduced: with
+- **No SDK type crosses the boundary.** Seven fields leave this module:
+  text, stop, `input_tokens`, `output_tokens`, model and, since Step 9,
+  `elapsed_seconds` and `reported_cost_usd`. Of the gateway's extra fields
+  only `cost` crosses, as the optional `reported_cost_usd` (see the
+  revisited decision above); `provider`, `speed` and `service_tier` are
+  still dropped — they vanish on the direct path, so code reading them
+  would break silently the day direct access is restored. The response
+  `id` is also excluded; its format differs between the two paths, and
+  Step 9's correlation uses a request id the service generates, so the
+  provider's id still has no consumer. No `ABC` or `Protocol` is
+  introduced: with
   a single implementation, an interface can only be a copy of that
   implementation's signature. Trigger: a second provider actually being
   connected
@@ -339,7 +396,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The model identifier is read from the response, not from the
   request.** The gateway resolves model names against its own catalogue,
   so the configured value and the value actually used need not match.
-  Step 9 prices what was used, not what was asked for
+  Step 9 records the model that was used, not the one that was asked for
 - **Nothing is wired into the application yet.** The client is not placed
   on `app.state` and no dependency accessor exists, because no consumer
   does. Wiring arrives in Step 6 alongside the endpoint that needs it.
@@ -379,8 +436,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything can handle them, render failures happen in front of a caller
 - **The version lives in the filename** (`<name>.v<N>.txt`), parsed into a
   name and an integer at load time. An integer rather than semver, because
-  a prompt has no API surface for compatibility to describe; what Step 9
-  persists and v6 groups by is order. In the filename rather than in
+  a prompt has no API surface for compatibility to describe; all a version
+  has to express is order. Step 9 persists the identifier as written
+  (`extract_paper_facts.v1`), so a query that orders by version has to
+  read the integer back out of it (see Known gaps). In the filename rather
+  than in
   file-internal metadata, because a frontmatter version can drift from the
   filename and nobody notices. A filename that does not match the pattern
   is an error, not a skipped file — skipping would hide the prompt's
@@ -506,7 +566,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Two error types, split by when they occur rather than by what caused them.**
   `NoSummaryError` is raised before any provider call and carries no token cost;
   `GenerationError` is raised after one and always does. That boundary is what
-  the retry budget and the usage accounting will each need. `GenerationError`
+  the retry budget and the usage accounting each rely on: a `NoSummaryError`
+  leaves no attempt to record, and a `GenerationError` always comes after
+  one. `GenerationError`
   carries the stop reason as data rather than folding four situations into one
   message — truncation is retryable with a different token limit, a refusal is
   not retryable at all, and a context overflow is not retryable without
@@ -529,7 +591,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second method needed all three; the structured path keeps its schema and its
   parser, and the free-text path has neither. The stop check is shared, because
   an incomplete generation is unusable regardless of the output shape
-  - **Classification is carried on the error type, not looked up in a central
+- **Classification is carried on the error type, not looked up in a central
   table.** A table would let a newly added type fall through to a default while
   nothing complained; a required keyword-only constructor argument means a type
   that supplies no category cannot be constructed at all. The enforcement is
@@ -622,6 +684,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly the case that broke, because the catch-all answered. What needed
   holding still was the pairing between a URL and the method that serves it,
   and only a real request through the stack demonstrates it
+- **The unit of record is the attempt, not the request.** A retried request
+  makes several provider attempts and any of them may have been billed — a
+  timed-out call included — so recording only the request, or only its last
+  attempt, would hide exactly the cost a retry adds. The design criterion was
+  that "how many attempts did this request take, and what did they cost?"
+  can be answered from the records, and one query over `llm_attempts` does
+  (README, Usage Accounting). Rows are keyed by `(request_id, attempt)`; the
+  request id is a `uuid4` the service generates for each logical request.
+  Rejected: separate request and attempt tables, while nothing describes a
+  request beyond its attempts; one row per request with aggregate counters,
+  which cannot say which attempt cost what; and structured logs alone, which
+  cannot answer the criterion with a query. Trigger: a v6 tracing backend
+  that carries these fields end to end
+- **One table, and the outcome says what an empty column means.** A
+  response, a translated provider error and an unclassified exception share
+  `llm_attempts`, told apart by `outcome`. Empty means unknown or not
+  applicable, and the outcome decides which: a response has no status code
+  to report, while a failed attempt's tokens are unknown, not zero
+- **No `ON CONFLICT`.** Writing a request's attempts twice is a bug; the
+  primary key refuses the second write instead of letting its cost be
+  counted twice. It cannot see one attempt written under two request ids —
+  that is the service's to prevent, and a service test holds it
+- **One `executemany` per request, after the request ends.** One call is
+  all-or-nothing on a pool and on a connection alike, so a request is never
+  left half recorded. Writing each attempt as it happened would put a
+  database round trip between retries and could leave a partial request
+  behind. The cost is that the attempts wait in memory until the request
+  ends (see Known gaps)
+- **The records are written whatever the outcome.** The write sits in
+  `finally`, so a request whose retries ran out — billed, perhaps, with
+  nothing to show for it — is recorded like any other. A write placed after
+  the call returns would lose exactly those attempts
+- **A failed write never changes the outcome (fail-open).** By the time the
+  write runs, the provider calls are over and the caller's result is
+  settled. An exception raised in `finally` replaces it: a paid-for answer
+  would become a `500`, and a `503` would become a `500` that blames the
+  database (measured). The failure goes to an `ERROR` line carrying the
+  records, so the loss is visible and recoverable rather than silent.
+  `Exception` is caught, not `BaseException`: a cancellation is not a failed
+  write and keeps propagating
+- **The recorder is transparent.** `observe` re-raises the original
+  exception with a bare `raise`: the retrier reads its category and
+  `retry_after`, and the HTTP layer picks a handler by its type, so a
+  wrapped exception would turn a `503` into a `500` (measured). It catches
+  `Exception`, not `BaseException`, because nothing in the application
+  cancels an attempt yet. Trigger: the first change that does, such as a
+  deadline, needs its own branch — a cancelled attempt may still have been
+  billed
+- **The request id and the recorder belong to one call, not to the
+  service.** One instance may serve several calls — FastAPI builds one per
+  HTTP request, but tests and scripts need not — and a recorder kept on the
+  instance would carry one call's attempts into the next call's rows, under
+  the new id and prompt. The primary key would not catch it
+- **`_generate` holds the mechanism; the public methods keep their
+  decisions.** Finding the article, rendering the prompt (and refusing an
+  article without an abstract), accepting the completion and parsing it
+  differ by operation; how a provider call is made — retried, observed,
+  recorded — is the same for every operation and has one home. The prompt
+  identifier is written once per method and feeds both the rendering and the
+  record, so a row cannot name a prompt that was not sent
+- **`009` has no `IF NOT EXISTS`.** On a database whose schema already holds
+  the table but whose ledger does not, `IF NOT EXISTS` would skip the
+  statement with a notice nobody sees and record the migration as applied,
+  hiding the drift. Without it the runner fails loudly and records nothing
+- **Schema changes go through `scripts/migrate.py` only.** The runner records
+  each file in `schema_migrations` in the transaction that applies it; the
+  files themselves are not re-runnable. A file run by hand changes the
+  schema without the ledger, and the runner then fails trying to apply it
+  again — which is how the working database had drifted, found this step
+  when the runner, asked to apply `009`, stopped at `003`. It was repaired by
+  recording the files already in the schema in the ledger, without running
+  them
+- **The batch test runs outside a transaction.** Inside one, the rollback
+  that keeps the connection usable after the refused statement would also
+  erase a half-written batch, so a half write and no write would look the
+  same; a version built on a savepoint passed against a per-row
+  implementation. The test writes through its own pool and deletes its rows
+  in `finally`
+- **Service tests assert only what the service decides.** Which rows exist,
+  how they group into requests, their numbering and their prompt belong to
+  the service; token, model, cost and timing values belong to the recorder
+  and the repository and are tested there. Expected values are literals,
+  never the code's own enum values, and the exhausted-retry test's three
+  failures carry distinct status codes, so each row can come from only one
+  attempt. Rows are compared whole, after sorting where their order is not
+  defined, so a failure shows the difference rather than `assert False`
+- **No separate test for a billed but unusable response.** The recorder test
+  shows that a truncated response is recorded, and the exhausted-retry test
+  shows that the service writes when a request fails; as long as the service
+  does not filter records, the case is their composition. Trigger: the
+  service filtering records
 
 ### Measurements
 - **JSON compliance, fixed input, decision rule written first.**
@@ -633,8 +786,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entirely `title` metadata Pydantic attaches to every field and to the
   model; it constrains nothing. Not stripped: doing so requires a custom
   schema generator, and 51 tokens is not a measured cost problem.
-  Trigger: the schema's share becoming a visible line item in Step 9's
-  accounting, or the schema growing in v5. Note the density — 284
+  Trigger: the schema growing in v5. The other half of the original
+  trigger, the schema's share showing up in Step 9's accounting, cannot
+  fire: the records keep input tokens per attempt, not the schema's share
+  of them. Note the density — 284
   characters cost 253 tokens, roughly 3.5 times the token-per-character
   rate of prose, because JSON punctuation tokenises badly
 - **`additionalProperties` is not required by this gateway.** Pydantic's
@@ -642,8 +797,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   require it; this one does not
 - **Input tokenisation is deterministic, sampling is not.** Input token
   counts were identical across every call in every run; output counts
-  were not. Step 9's cost accounting can predict the input side and only
-  the input side
+  were not. A cost estimated before a call can be exact on the input side
+  and only on the input side; Step 9 records what each call used rather
+  than predicting it
 - **The two arms have the same latency; the schema costs money, not
   time.** Under an interleaved run the medians are identical to two
   decimals (1.76s both arms) despite arm B sending 253 more input tokens
@@ -652,13 +808,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a larger prompt buys a larger bill rather than a slower call. The
   earlier 6.5x gap between arms was an artefact of the blocked design and
   did not survive interleaving
-  - **The 12.34s figure was an arm mean, not a call.** It came from a blocked
+- **The 12.34s figure was an arm mean, not a call.** It came from a blocked
   run in which one arm of ten averaged 12.34s and the same configuration,
   re-run, averaged 1.65s; an earlier entry recorded it as a single call. The
   longest single call has not been recorded anywhere, which is why the
   timeout values are borrowed rather than set from the tail: a ten-call run
   in calm conditions reports a calm maximum, and the tail will come from
-  per-attempt records rather than from any one run
+  the per-attempt records Step 9 now writes (`llm_attempts.elapsed_seconds`)
+  rather than from any one run
 - **A timeout bounds silence, not the call.** Over a real socket, with the
   client's float timeout set to 2s: a response that sent one byte per second
   for six seconds returned `200` after 6.04s; headers at 1.5s and the body
@@ -699,7 +856,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that file is the only one that reaches `sentence_transformers` through
   `ArticleService`. The 28 database cases cost roughly 1.4s in total. A first
   cold run measured 23.85s and did not reproduce
-  - **Route declaration order decides which handler wins, silently.** Starlette
+- **Route declaration order decides which handler wins, silently.** Starlette
   tries routes in declaration order and the first match serves the request.
   `/articles/{arxiv_id}` matches any single segment, `search` included, so the
   literal routes only work while they are declared above it. Reversing the two
@@ -716,7 +873,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loop inside `complete()`, which would break the single-call invariant the
   attempt budget rests on; and a retrying wrapper installed in the lifespan,
   whose one line of wiring no test runs and which would hide attempts from the
-  layer that will record their usage. Installed in the factory instead, it
+  layer that records their usage. Installed in the factory instead, it
   would also change what `scripts/measure_json_compliance.py` measures.
   Trigger for centralising: a second service that calls the provider
 - **The switched-off SDK policy, restored element by element.** Kept: three
@@ -728,8 +885,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to be honoured. Dropped: retrying 408 and 409, which the error taxonomy
   classifies as internal; `x-should-retry`, not observed through the gateway;
   and the 8s cap, which three attempts never reach. Every value is borrowed
-  from the SDK, not measured here; per-attempt records will be the first data
-  to tune them
+  from the SDK, not measured here; the per-attempt records Step 9 writes are
+  the first data to tune them, and nothing has been tuned from them yet
 - **A request that timed out is retried.** The provider may already have
   billed it — the gateway documents that cancelling a non-streaming request
   still bills the full response — but `max_tokens` caps that cost at about
@@ -763,6 +920,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose latencies add up for a waiting reader. A retry repeats one call, and
   streaming a failed attempt gains nothing. Its second condition says
   *regularly*, and retries are the exception
+- **First live record.** One `POST /articles/{arxiv_id}/facts` through the
+  gateway left one row: 644 input and 161 output tokens, 4.90s, model
+  `anthropic/claude-haiku-4.5`, reported cost $0.001449. At the provider's
+  list price for Claude Haiku 4.5 — $1 per million input tokens and $5 per
+  million output tokens — the same tokens cost $0.000644 + $0.000805 =
+  $0.001449: the reported figure is list price times the recorded tokens,
+  with no margin on the call itself. The reported model matched the
+  configured one. A request for an unknown article left no row
+- **A write error in `finally` replaces the outcome.** Over HTTP, with the
+  usage store refusing every write: with the fail-open `except`, a
+  successful call answered `200` with its facts and an exhausted retry
+  answered `503`; without it, both answered `500` with "Database service is
+  currently unavailable"
+- **A per-row write leaves half a batch.** With `executemany` replaced by one
+  `execute` per row, a batch refused at its third row left its first two
+  rows committed; with `executemany`, none
+- **Every recording decision was broken on purpose.** A recorder kept on the
+  service, `observe` moved outside the retrier, the write moved out of
+  `finally`, the fail-open `except` narrowed, the log call lowered to
+  `DEBUG` or changed to `logger.error`: each failed exactly the tests that
+  claim it. Removing the request id from the fail-open log line failed none
+  (see Known gaps)
 
 ### Known gaps
 
@@ -786,7 +965,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/articles/search` path, which is a public contract. Reassessed in v5: hybrid
   search forces all three to be named at once, and a path change belongs on a
   version boundary
-  - A caller that gives up does not stop the attempts. At the ASGI level a
+- A caller that gives up does not stop the attempts. At the ASGI level a
   handler runs to completion after the client disconnects, so retries go on,
   billed, for a reader who has left, and nothing inside the service can see
   it. `httpx`'s own default timeout is 5s, so the first Python client written
@@ -806,6 +985,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A response that keeps trickling bytes is not bounded: every phase timeout
   measures silence, and there is no deadline. Reassessed when per-attempt
   records show an attempt outlasting connect plus read
+- The attempts of a request wait in memory until the request ends, so a
+  process that dies between a provider call and the write loses that
+  request's records. Accepted while the records serve cost visibility;
+  reassessed if they are ever used for billing
+- A request's cost read from `llm_attempts` is a lower bound whenever one of
+  its attempts failed: a failed attempt's cost is unknown, and it may still
+  have been billed. On the direct path no cost is known at all
+- Cancelled attempts are not recorded: the recorder catches `Exception`, not
+  `BaseException`. Nothing cancels an attempt today; reassessed with the
+  first change that does
+- The request id in the fail-open log line is not asserted: removing it from
+  the message breaks no test. Nothing correlates log lines by request id
+  yet; reassessed in v6, when tracing does
+- `prompt_identifier` is stored as written, so ordering by it is textual and
+  `v10` sorts before `v9`. Reassessed in v6, when records are grouped by
+  prompt version
 
 ---
 
