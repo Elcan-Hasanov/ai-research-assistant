@@ -1,23 +1,26 @@
-"""Service-level tests for LLM fact extraction.
+"""Service-level tests for LLM generation and the usage records it leaves.
 
-The database is real: the behaviour under test includes the repository query
-and the column-to-template mapping that sits on top of it. The provider is
-faked: a real call is non-deterministic, billed, and slow.
+The database is real: the behaviour under test includes the repository query,
+the column-to-template mapping that sits on top of it, and the attempt rows the
+service writes. The provider is faked: a real call is non-deterministic,
+billed, and slow.
 """
 
 import json
+import logging
+from operator import itemgetter
 
 import pytest
 
-from app.core.llm import CompletionStop, LLMCompletion, LLMError
 from app.core.errors import NotFoundError
+from app.core.llm import CompletionStop, LLMCompletion, LLMError
 from app.generation.extraction import PaperFacts
 from app.services.generation_service import (
     GenerationError,
     GenerationService,
     NoSummaryError,
 )
-from tests.conftest import FakeLLMClient
+from tests.conftest import FakeLLMClient, recorded_attempts
 from tests.factories import insert_article
 
 pytestmark = pytest.mark.db
@@ -69,6 +72,19 @@ def truncated(text: str) -> LLMCompletion:
     )
 
 
+def unavailable(status_code: int) -> LLMError:
+    """A retryable upstream failure that asks for no wait, so the shipped
+    retrier moves on at once. A new object every call: a raised exception
+    keeps its traceback, and one reused across attempts would carry them all.
+    """
+    return LLMError("LLM request failed", status_code=status_code, retry_after=0.0)
+
+
+def select_columns(rows: list[dict], *columns: str) -> list[dict]:
+    """The named columns of each row, so a test compares only what it is about."""
+    return [{column: row[column] for column in columns} for row in rows]
+
+
 # --- Fixtures ---
 
 
@@ -86,9 +102,12 @@ async def seeded_article(db_conn) -> str:
 
 # --- Tests ---
 
-async def test_extract_facts_returns_validated_facts(repository, seeded_article):
+
+async def test_extract_facts_returns_validated_facts(
+    repository, seeded_article, usage_repository
+):
     client = FakeLLMClient(response=completed(FACTS_JSON))
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     facts = await service.extract_facts(seeded_article)
 
@@ -99,11 +118,11 @@ async def test_extract_facts_returns_validated_facts(repository, seeded_article)
 
 
 async def test_summarize_article_returns_free_text_summary(
-    repository, seeded_article
+    repository, seeded_article, usage_repository
 ):
     expected_summary = "A three-sentence concise summary of the academic paper."
     client = FakeLLMClient(response=completed(expected_summary))
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     summary = await service.summarize_article(seeded_article)
 
@@ -113,11 +132,12 @@ async def test_summarize_article_returns_free_text_summary(
     assert last_call["response_schema"] is None
     assert "summarises academic papers" in last_call["system"]
 
+
 async def test_extract_facts_passes_correct_parameters_to_llm(
-    repository, seeded_article
+    repository, seeded_article, usage_repository
 ):
     client = FakeLLMClient(response=completed(FACTS_JSON))
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     await service.extract_facts(seeded_article)
 
@@ -133,7 +153,7 @@ async def test_extract_facts_passes_correct_parameters_to_llm(
 
 @pytest.mark.parametrize("empty_summary", [None, "", "   "])
 async def test_extract_facts_raises_no_summary_error_when_summary_is_empty_or_none(
-    db_conn, repository, empty_summary
+    db_conn, repository, empty_summary, usage_repository
 ):
     arxiv_id = "2603.00002"
     await insert_article(
@@ -144,7 +164,7 @@ async def test_extract_facts_raises_no_summary_error_when_summary_is_empty_or_no
     )
 
     client = FakeLLMClient()
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     with pytest.raises(NoSummaryError):
         await service.extract_facts(arxiv_id)
@@ -153,10 +173,10 @@ async def test_extract_facts_raises_no_summary_error_when_summary_is_empty_or_no
 
 
 async def test_extract_facts_rejects_truncated_response_even_when_text_parses(
-    repository, seeded_article
+    repository, seeded_article, usage_repository
 ):
     client = FakeLLMClient(response=truncated(FACTS_JSON))
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     with pytest.raises(GenerationError) as exc:
         await service.extract_facts(seeded_article)
@@ -165,9 +185,11 @@ async def test_extract_facts_rejects_truncated_response_even_when_text_parses(
     assert len(client.calls) == 1
 
 
-async def test_extract_facts_raises_not_found_when_article_not_found(repository):
+async def test_extract_facts_raises_not_found_when_article_not_found(
+    repository, usage_repository
+):
     client = FakeLLMClient()
-    service = GenerationService(repository, client)
+    service = GenerationService(repository, client, usage_repository)
 
     with pytest.raises(NotFoundError) as caught:
         await service.extract_facts("nonexistent.00000")
@@ -176,50 +198,153 @@ async def test_extract_facts_raises_not_found_when_article_not_found(repository)
     assert len(client.calls) == 0
 
 
-async def test_extract_facts_retries_an_unavailable_upstream(repository, seeded_article):
-    """The provider call goes through the retry layer the service ships with: 
-    an unavailable first attempt is followed by a second, and the facts come from that one."""
-
-    # Lets the shipped retrier retry without waiting.
-    client = FakeLLMClient(
-        outcomes=[
-            LLMError(
-                "LLM request failed",
-                status_code=429,
-                provider_error="RateLimitError",
-                retry_after=0.0,
-            ),
-            completed(FACTS_JSON),
-        ]
-    )
-    service = GenerationService(repository, client)
+async def test_extract_facts_retries_an_unavailable_upstream(
+    repository, seeded_article, usage_repository
+):
+    """The provider call goes through the retry layer the service ships with:
+    an unavailable first attempt is followed by a second, and the facts come
+    from that one."""
+    client = FakeLLMClient(outcomes=[unavailable(429), completed(FACTS_JSON)])
+    service = GenerationService(repository, client, usage_repository)
 
     facts = await service.extract_facts(seeded_article)
 
     assert len(client.calls) == 2
-
     assert isinstance(facts, PaperFacts)
 
-async def test_summarize_article_retries_an_unavailable_upstream(repository, seeded_article):
-    """The same holds for the summary: the first attempt fails as unavailable, and the summary comes from the second."""
 
+async def test_summarize_article_retries_an_unavailable_upstream(
+    repository, seeded_article, usage_repository
+):
+    """The same holds for the summary: the first attempt fails as unavailable,
+    and the summary comes from the second."""
     expected_summary = "A three-sentence concise summary of the academic paper."
-    # Lets the shipped retrier retry without waiting.
-    client = FakeLLMClient(
-        outcomes=[
-            LLMError(
-                "LLM request failed",
-                status_code=429,
-                provider_error="RateLimitError",
-                retry_after=0.0,
-            ),
-            completed(expected_summary),
-        ]
-    )
-    service = GenerationService(repository, client)
+    client = FakeLLMClient(outcomes=[unavailable(429), completed(expected_summary)])
+    service = GenerationService(repository, client, usage_repository)
 
     summary = await service.summarize_article(seeded_article)
 
     assert len(client.calls) == 2
-
     assert summary == expected_summary
+
+
+# --- Usage recording ---
+
+
+class _UnreachableUsageRepository:
+    """Stands in for a usage store the service cannot reach: every write fails."""
+
+    async def record_attempts(self, request_id, prompt_identifier, attempts) -> None:
+        raise ConnectionRefusedError("usage store unreachable")
+
+
+async def test_a_retried_request_records_every_attempt_under_one_id(
+    repository, seeded_article, usage_repository, db_conn
+):
+    """Every attempt of a retried request is recorded under one request id,
+    the failed one included, in the order it was made."""
+    client = FakeLLMClient(outcomes=[unavailable(529), completed(FACTS_JSON)])
+    service = GenerationService(repository, client, usage_repository)
+
+    await service.extract_facts(seeded_article)
+
+    rows = await recorded_attempts(db_conn)
+    assert len({row["request_id"] for row in rows}) == 1
+    assert select_columns(
+        rows, "attempt", "prompt_identifier", "outcome", "stop", "status_code"
+    ) == [
+        {
+            "attempt": 1,
+            "prompt_identifier": "extract_paper_facts.v1",
+            "outcome": "llm_error",
+            "stop": None,
+            "status_code": 529,
+        },
+        {
+            "attempt": 2,
+            "prompt_identifier": "extract_paper_facts.v1",
+            "outcome": "response",
+            "stop": "completed",
+            "status_code": None,
+        },
+    ]
+
+
+async def test_attempts_are_recorded_when_retries_run_out(
+    repository, seeded_article, usage_repository, db_conn
+):
+    """When the retries run out, the attempts are still recorded before the
+    error leaves: each of them may have been billed."""
+    client = FakeLLMClient(
+        outcomes=[unavailable(429), unavailable(529), unavailable(503)]
+    )
+    service = GenerationService(repository, client, usage_repository)
+
+    with pytest.raises(LLMError):
+        await service.extract_facts(seeded_article)
+
+    rows = await recorded_attempts(db_conn)
+    assert len({row["request_id"] for row in rows}) == 1
+    assert select_columns(rows, "attempt", "outcome", "status_code") == [
+        {"attempt": 1, "outcome": "llm_error", "status_code": 429},
+        {"attempt": 2, "outcome": "llm_error", "status_code": 529},
+        {"attempt": 3, "outcome": "llm_error", "status_code": 503},
+    ]
+
+
+async def test_each_call_is_recorded_as_its_own_request(
+    repository, seeded_article, usage_repository, db_conn
+):
+    """Two calls on one service are two requests: each gets its own id,
+    starts again at attempt 1 and carries its own prompt."""
+    client = FakeLLMClient(
+        outcomes=[completed(FACTS_JSON), completed("A short summary.")]
+    )
+    service = GenerationService(repository, client, usage_repository)
+
+    await service.extract_facts(seeded_article)
+    await service.summarize_article(seeded_article)
+
+    rows = await recorded_attempts(db_conn)
+    assert len({row["request_id"] for row in rows}) == 2
+    # Request ids are random, so the two requests' rows come back in either
+    # order: sorting by prompt gives them one order to compare against.
+    assert sorted(
+        select_columns(rows, "prompt_identifier", "attempt"),
+        key=itemgetter("prompt_identifier"),
+    ) == [
+        {"prompt_identifier": "extract_paper_facts.v1", "attempt": 1},
+        {"prompt_identifier": "summarize_article.v1", "attempt": 1},
+    ]
+
+
+async def test_a_failed_usage_write_keeps_the_result_and_logs_the_attempts(
+    repository, seeded_article, caplog
+):
+    """A usage store the service cannot reach changes nothing for the caller:
+    the facts come back, and the attempts go to an ERROR log instead."""
+    client = FakeLLMClient(outcomes=[completed(FACTS_JSON)])
+    service = GenerationService(repository, client, _UnreachableUsageRepository())
+
+    # Scoped to the service's logger, so the capture does not depend on how
+    # logging is configured elsewhere in the test session.
+    with caplog.at_level(logging.ERROR, logger="app.services.generation_service"):
+        facts = await service.extract_facts(seeded_article)
+
+    assert isinstance(facts, PaperFacts)
+    assert (
+        facts.problem == "Sequence models rely on recurrence, which limits parallelism."
+    )
+
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1
+
+    message = errors[0].getMessage()
+    assert message.startswith("Usage not recorded:")
+    assert "prompt=extract_paper_facts.v1" in message
+    assert "input_tokens=247" in message
+    
+    # Only logger.exception attaches the exception: logged with logger.error,
+    # the record would carry no traceback of the failed write.
+    assert errors[0].exc_info is not None
+    assert errors[0].exc_info[0] is ConnectionRefusedError

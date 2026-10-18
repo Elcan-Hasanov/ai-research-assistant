@@ -4,6 +4,7 @@ from fastapi import Depends, Request
 from app.core.embedding import EmbeddingModel
 from app.core.llm import LLMClient
 from app.repositories.article_repository import ArticleRepository
+from app.repositories.usage_repository import UsageRepository
 from app.services.article_service import ArticleService
 from app.services.generation_service import GenerationService
 
@@ -26,6 +27,12 @@ async def get_article_repository(
     return ArticleRepository(pool)
 
 
+async def get_usage_repository(
+    pool: asyncpg.Pool = Depends(get_db_pool),
+) -> UsageRepository:
+    return UsageRepository(pool)
+
+
 async def get_article_service(
     repo: ArticleRepository = Depends(get_article_repository),
     model: EmbeddingModel = Depends(get_embedding_model),
@@ -36,5 +43,6 @@ async def get_article_service(
 async def get_generation_service(
     repo: ArticleRepository = Depends(get_article_repository),
     client: LLMClient = Depends(get_llm_client),
+    usage: UsageRepository = Depends(get_usage_repository),
 ) -> GenerationService:
-    return GenerationService(repo, client)
+    return GenerationService(repo, client, usage)
