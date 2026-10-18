@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.core.database import create_script_pool, get_standalone_db_connection
 from app.core.llm import CompletionStop, LLMCompletion
 from app.repositories.article_repository import ArticleRepository
+from app.repositories.usage_repository import UsageRepository
 
 
 TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "arxiv_test")
@@ -87,6 +88,17 @@ async def db_conn():
 @pytest.fixture
 def repository(db_conn) -> ArticleRepository:
     return ArticleRepository(db_conn)
+
+
+@pytest.fixture
+def usage_repository(db_conn) -> UsageRepository:
+    return UsageRepository(db_conn)
+
+
+async def recorded_attempts(conn) -> list[dict]:
+    """Every row in llm_attempts, read with plain SQL: the application has no reader yet."""
+    rows = await conn.fetch("SELECT * FROM llm_attempts ORDER BY request_id, attempt")
+    return [dict(row) for row in rows]
 
 
 def _deterministic_unit_vector(text: str, dimension: int) -> list[float]:
