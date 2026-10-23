@@ -15,6 +15,7 @@ import pytest
 from app.core.errors import NotFoundError
 from app.core.llm import CompletionStop, LLMCompletion, LLMError
 from app.generation.extraction import PaperFacts
+from app.prompts.registry import render
 from app.services.generation_service import (
     GenerationError,
     GenerationService,
@@ -128,27 +129,55 @@ async def test_summarize_article_returns_free_text_summary(
 
     assert summary == expected_summary
 
-    last_call = client.calls[-1]
-    assert last_call["response_schema"] is None
-    assert "summarises academic papers" in last_call["system"]
 
-
-async def test_extract_facts_passes_correct_parameters_to_llm(
+async def test_extract_facts_sends_the_expected_request(
     repository, seeded_article, usage_repository
 ):
+    """complete() receives exactly this request, so no part of it can change unseen.
+
+    Rendering the expectation from TITLE and SUMMARY also pins which column
+    fills which template variable. The prompt text is rendered rather than
+    copied: what a template says belongs to the prompt's version, not to this
+    test.
+    """
     client = FakeLLMClient(response=completed(FACTS_JSON))
     service = GenerationService(repository, client, usage_repository)
 
     await service.extract_facts(seeded_article)
 
-    assert len(client.calls) == 1
-    call = client.calls[0]
+    prompt = render("extract_paper_facts.v1", title=TITLE, abstract=SUMMARY)
+    assert client.calls == [
+        {
+            "messages": [{"role": "user", "content": prompt.user}],
+            "max_tokens": 500,
+            "system": prompt.system,
+            "response_schema": PaperFacts.model_json_schema(),
+            "model": None,
+            "temperature": None,
+        }
+    ]
 
-    assert call["system"] is not None
-    assert call["system"] != call["messages"][0]["content"]
-    assert call["response_schema"] == PaperFacts.model_json_schema()
-    assert SUMMARY in call["messages"][0]["content"]
-    assert TITLE in call["messages"][0]["content"]
+
+async def test_summarize_article_sends_the_expected_request(
+    repository, seeded_article, usage_repository
+):
+    """The summary counterpart of test_extract_facts_sends_the_expected_request."""
+    client = FakeLLMClient(response=completed("A concise summary of the paper."))
+    service = GenerationService(repository, client, usage_repository)
+
+    await service.summarize_article(seeded_article)
+
+    prompt = render("summarize_article.v1", title=TITLE, abstract=SUMMARY)
+    assert client.calls == [
+        {
+            "messages": [{"role": "user", "content": prompt.user}],
+            "max_tokens": 500,
+            "system": prompt.system,
+            "response_schema": None,
+            "model": None,
+            "temperature": None,
+        }
+    ]
 
 
 @pytest.mark.parametrize("empty_summary", [None, "", "   "])
