@@ -1,13 +1,19 @@
 """Generation use cases over stored articles: structured facts and summaries.
 
-Each public method is one use case: it loads the article, renders the prompt,
+Each public method is one use case: it loads the article, builds the request,
 asks for a completion and decides whether the result is acceptable. Getting
 the completion is the same for every use case and happens in one place,
 GenerationService._generate, which retries the call and records every attempt.
+
+What a use case sends is built by a module-level function that does no I/O,
+so a script or a test can send exactly what production sends.
 """
 
 import logging
 import uuid
+from typing import Any
+
+from pydantic import BaseModel
 
 from app.core.errors import AppError, FailureCategory, NotFoundError
 from app.core.llm import CompletionStop, LLMClient, LLMCompletion
@@ -94,6 +100,75 @@ def _require_completed(completion: LLMCompletion) -> None:
         )
 
 
+class GenerationRequest(BaseModel):
+    """What one use case sends to the provider, and the name it is recorded under.
+
+    Apart from prompt_identifier, the fields are the keyword arguments of
+    LLMClient.complete(), with the same names and types.
+    """
+
+    # Recorded with every attempt; never sent to the provider.
+    prompt_identifier: str
+
+    messages: list[dict[str, Any]]
+    max_tokens: int
+    system: str | None
+    response_schema: dict[str, Any] | None = None
+
+    def to_completion_kwargs(self) -> dict[str, Any]:
+        """The keyword arguments for LLMClient.complete().
+
+        Every field is passed except the ones excluded here. Naming what must
+        not be sent, rather than what must, decides how a forgotten update
+        fails: a new field is sent without anyone adding it here, and a new
+        field that should stay on this side fails loudly, because complete()
+        rejects an argument it does not declare.
+        """
+        return self.model_dump(exclude={"prompt_identifier"})
+
+
+def _build_request(
+    record: dict,
+    prompt_identifier: str,
+    *,
+    max_tokens: int,
+    response_schema: dict[str, Any] | None = None,
+) -> GenerationRequest:
+    """Render one use case's prompt for an article and wrap it as a request.
+
+    This is the only place a rendered prompt becomes messages and a system
+    prompt.
+    """
+    prompt = _prepare_prompt(record, prompt_identifier)
+    return GenerationRequest(
+        prompt_identifier=prompt_identifier,
+        messages=[{"role": "user", "content": prompt.user}],
+        max_tokens=max_tokens,
+        system=prompt.system,
+        response_schema=response_schema,
+    )
+
+
+def extraction_request(record: dict) -> GenerationRequest:
+    """The request extract_facts sends for one article."""
+    return _build_request(
+        record,
+        "extract_paper_facts.v1",
+        max_tokens=500,
+        response_schema=PaperFacts.model_json_schema(),
+    )
+
+
+def summary_request(record: dict) -> GenerationRequest:
+    """The request summarize_article sends for one article."""
+    return _build_request(
+        record,
+        "summarize_article.v1",
+        # Copied from extraction_request; unmeasured for a free-text summary.
+        max_tokens=500,
+    )
+
+
 class GenerationService:
     """LLM use cases over stored articles.
 
@@ -136,15 +211,8 @@ class GenerationService:
                 attempts,
             )
 
-    async def _generate(
-        self,
-        prompt: RenderedPrompt,
-        prompt_identifier: str,
-        *,
-        max_tokens: int,
-        response_schema: dict | None = None,
-    ) -> LLMCompletion:
-        """Send one rendered prompt through the retrier and record every attempt.
+    async def _generate(self, request: GenerationRequest) -> LLMCompletion:
+        """Send one request through the retrier and record every attempt.
 
         The attempts are saved whether the request succeeds or fails, since a
         failed attempt may still have been billed. The completion comes back as
@@ -157,16 +225,15 @@ class GenerationService:
             # sends a fresh request and is observed on its own.
             completion = await self._retrier.run(
                 lambda: recorder.observe(
-                    self._client.complete(
-                        messages=[{"role": "user", "content": prompt.user}],
-                        max_tokens=max_tokens,
-                        system=prompt.system,
-                        response_schema=response_schema,
-                    )
+                    self._client.complete(**request.to_completion_kwargs())
                 )
             )
         finally:
-            await self._save_attempts(request_id, prompt_identifier, recorder.attempts)
+            await self._save_attempts(
+                request_id,
+                request.prompt_identifier,
+                recorder.attempts,
+            )
         return completion
 
     async def extract_facts(self, arxiv_id: str) -> PaperFacts:
@@ -175,15 +242,7 @@ class GenerationService:
         if record is None:
             raise NotFoundError(arxiv_id=arxiv_id)
 
-        prompt_identifier = "extract_paper_facts.v1"
-        prompt = _prepare_prompt(record, prompt_identifier)
-
-        completion = await self._generate(
-            prompt,
-            prompt_identifier,
-            max_tokens=500,
-            response_schema=PaperFacts.model_json_schema(),
-        )
+        completion = await self._generate(extraction_request(record))
         _require_completed(completion)
 
         return parse_paper_facts(completion.text)
@@ -194,11 +253,7 @@ class GenerationService:
         if record is None:
             raise NotFoundError(arxiv_id=arxiv_id)
 
-        prompt_identifier = "summarize_article.v1"
-        prompt = _prepare_prompt(record, prompt_identifier)
-
-        # max_tokens=500 is copied from extract_facts; unmeasured for free-text summary.
-        completion = await self._generate(prompt, prompt_identifier, max_tokens=500)
+        completion = await self._generate(summary_request(record))
         _require_completed(completion)
 
         return completion.text
