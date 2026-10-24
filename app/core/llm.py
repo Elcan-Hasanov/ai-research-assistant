@@ -280,8 +280,21 @@ class LLMClient:
 _CONNECT_TIMEOUT_SECONDS = 5.0
 
 
-def create_llm_client(model: str | None = None) -> LLMClient:
-    """Factory that builds the SDK client with this project's transport policy."""
+def create_llm_client(
+    model: str | None = None,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> LLMClient:
+    """Factory that builds the SDK client with this project's transport policy.
+
+    Args:
+        http_client: The HTTP client the SDK sends through. The application
+            passes none and the SDK builds its own. A caller that has to see
+            the response bytes, such as the response-variability measurement,
+            passes one built with anthropic.DefaultAsyncHttpxClient, which
+            keeps the SDK's connection defaults. The timeouts below apply
+            either way: the SDK sets them on every request it builds.
+    """
     settings = get_settings()
     name = model or settings.llm_model
     credential = settings.llm_api_key.get_secret_value()
@@ -303,12 +316,14 @@ def create_llm_client(model: str | None = None) -> LLMClient:
             base_url=settings.llm_base_url,
             timeout=timeout,
             max_retries=0,
+            http_client=http_client,
         )
     else:
         sdk_client = AsyncAnthropic(
             api_key=credential,
             timeout=timeout,
             max_retries=0,
+            http_client=http_client,
         )
 
     logger.info(

@@ -1,3 +1,4 @@
+import json
 import math
 import time
 
@@ -18,6 +19,9 @@ from app.core.llm import (
     parse_retry_after,
     parse_reported_cost
 )
+from app.generation.extraction import parse_paper_facts
+from app.services.generation_service import extraction_request
+from tests.conftest import load_recording
 
 
 RAW = {
@@ -312,6 +316,36 @@ async def test_factory_uses_layered_timeouts(factory_built_client):
 
 
 @pytest.mark.parametrize(
+    "base_url", ["https://gateway.test/api/v1", ""], ids=["gateway", "direct"]
+)
+async def test_factory_sends_through_the_http_client_it_is_given(base_url, monkeypatch):
+    """A client passed to the factory carries the request, on both paths.
+
+    The response-variability measurement records what this client receives.
+    A branch that dropped the argument would leave the SDK on a client of its
+    own, and the measurement would see nothing.
+    """
+    monkeypatch.setenv("LLM_BASE_URL", base_url)
+    get_settings.cache_clear()
+    sent: list[httpx.Request] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return _succeeding(RAW)(request)
+
+    client = create_llm_client(
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(recording))
+    )
+    try:
+        await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+        get_settings.cache_clear()
+
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
     ("headers", "expected"),
     [
         ({"retry-after": "7"}, 7.0),
@@ -447,3 +481,100 @@ def test_a_raw_cost_is_read_as_dollars_or_none(value, expected):
     actual = parse_reported_cost(value)
 
     assert actual == expected
+
+
+# ============================================================================
+# What complete() sends. An optional argument reaches the request body only
+# when the caller gave one: an explicit null is not the same as an absent key,
+# and a provider may reject it.
+# ============================================================================
+
+OPTIONAL_KEYS = ("system", "temperature", "output_config")
+
+ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
+
+
+async def test_complete_sends_optional_arguments_when_given():
+    client, sent = _client_for(_succeeding(RAW))
+
+    try:
+        await client.complete(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=10,
+            system="Answer in one word.",
+            temperature=0.3,
+            response_schema=ANSWER_SCHEMA,
+        )
+    finally:
+        await client.aclose()
+
+    body = json.loads(sent[0].content)
+    assert {key: body.get(key) for key in OPTIONAL_KEYS} == {
+        "system": "Answer in one word.",
+        "temperature": 0.3,
+        "output_config": {"format": {"type": "json_schema", "schema": ANSWER_SCHEMA}},
+    }
+
+
+async def test_complete_omits_optional_arguments_that_are_not_given():
+    client, sent = _client_for(_succeeding(RAW))
+
+    try:
+        await client.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+    finally:
+        await client.aclose()
+
+    body = json.loads(sent[0].content)
+    assert [key for key in OPTIONAL_KEYS if key in body] == []
+
+
+# ============================================================================
+# A recorded response. scripts/measure_response_variability.py captured it on
+# the wire from a real call; it is replaced by recording again, never edited.
+# ============================================================================
+
+async def test_complete_reads_every_field_of_a_recorded_response():
+    """Every field this project reads is taken from where the gateway puts it.
+
+    The recording ended normally: the script records no other kind of
+    response. The expected values come from the recording itself, so a new
+    recording needs no change here.
+    """
+    recording = load_recording("extract_paper_facts.v1")
+    body = recording["response"]
+    client, _ = _client_for(_succeeding(body))
+    request = extraction_request(recording["article"])
+
+    try:
+        completion = await client.complete(**request.to_completion_kwargs())
+    finally:
+        await client.aclose()
+
+    assert completion.model_dump(exclude={"elapsed_seconds"}) == {
+        "text": body["content"][0]["text"],
+        "stop": CompletionStop.COMPLETED,
+        "input_tokens": body["usage"]["input_tokens"],
+        "output_tokens": body["usage"]["output_tokens"],
+        "model": body["model"],
+        "reported_cost_usd": body["usage"]["cost"],
+    }
+
+
+def test_a_recorded_response_parses_into_paper_facts():
+    """The extraction parser accepts what the model actually returned.
+
+    Hand-written JSON shows what we expect the model to say; this is what it
+    said. It also notices a recording gone stale on this side: a change to
+    PaperFacts that the recorded answer no longer fits fails here, and the fix
+    is a new recording.
+    """
+    text = load_recording("extract_paper_facts.v1")["response"]["content"][0]["text"]
+
+    facts = parse_paper_facts(text)
+
+    assert facts.model_dump() == json.loads(text)

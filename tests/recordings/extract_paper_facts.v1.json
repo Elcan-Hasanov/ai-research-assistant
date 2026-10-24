@@ -1,0 +1,51 @@
+{
+  "recorded_at": "2026-10-23T14:08:35+00:00",
+  "prompt_identifier": "extract_paper_facts.v1",
+  "article": {
+    "title": "Attention Is All You Need",
+    "summary": "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks that include an encoder and a decoder. We propose a new simple network architecture, the Transformer, based solely on attention mechanisms, dispensing with recurrence and convolutions entirely. Experiments on two machine translation tasks show these models to be superior in quality while being more parallelizable and requiring significantly less time to train."
+  },
+  "response": {
+    "id": "msg_bdrk_011CgKJJeaK92drfT8Y68Dda",
+    "type": "message",
+    "role": "assistant",
+    "container": null,
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"problem\": \"Sequence transduction models based on recurrent or convolutional neural networks are complex and not easily parallelizable, requiring significant training time.\", \"contributions\": [\"Proposed the Transformer, a new network architecture based solely on attention mechanisms that dispenses with recurrence and convolutions entirely\", \"Demonstrated that the Transformer achieves superior quality on machine translation tasks while being more parallelizable and requiring significantly less training time\"], \"evaluated\": true}",
+        "citations": []
+      }
+    ],
+    "model": "anthropic/claude-haiku-4.5",
+    "stop_reason": "end_turn",
+    "stop_details": null,
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 500,
+      "output_tokens": 99,
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "inference_geo": null,
+      "server_tool_use": null,
+      "service_tier": null,
+      "speed": "standard",
+      "cost": 0.000995,
+      "is_byok": false,
+      "cost_details": {
+        "upstream_inference_cost": 0.000995,
+        "upstream_inference_prompt_cost": 0.0005,
+        "upstream_inference_completions_cost": 0.000495
+      }
+    },
+    "context_management": null,
+    "provider": "Amazon Bedrock"
+  }
+}

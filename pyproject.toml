@@ -8,4 +8,5 @@ asyncio_default_fixture_loop_scope = "function"
 
 markers = [
     "db: test requires a live PostgreSQL test database (deselect with -m 'not db')",
+    "live: test calls the real LLM provider and is billed; skipped unless --live is given",
 ]

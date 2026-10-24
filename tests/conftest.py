@@ -1,14 +1,17 @@
-"""Shared test fixtures.
+"""Shared test fixtures and helpers.
 
-Provides the test database setup, transaction isolation, and deterministic
-embedding model used across the test suite.
+Provides the test database setup and its guard, transaction isolation, the
+deterministic embedding model and LLM client doubles, the recorded provider
+responses, and the --live switch that keeps billed tests out of a normal run.
 """
 
 import asyncio
 import hashlib
+import json
 import math
 import os
 import random
+from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -63,15 +66,54 @@ async def _check_test_database() -> None:
         await conn.close()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help="also run the tests marked live; they call the real LLM provider and are billed",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip the live tests unless --live was given.
+
+    The marker says which tests are live; the option says whether this run may
+    spend money. A -m expression cannot do the second job: -m options do not
+    combine, so a default -m "not live" in addopts would be replaced by any -m
+    on the command line, -m "not db" included.
+    """
+    if config.getoption("--live"):
+        return
+    skip_live = pytest.mark.skip(reason="calls the real LLM provider; run with --live")
+    for item in items:
+        if item.get_closest_marker("live") is not None:
+            item.add_marker(skip_live)
+
+
 @pytest.fixture(scope="session", autouse=True)
-def test_database_ready() -> None:
-    """Deliberately a sync fixture so it can own and close its event loop."""
+def test_database_ready(request: pytest.FixtureRequest) -> None:
+    """Check the test database once per session, if a selected test needs it.
+
+    A session that selects no db test, such as -m "not db" or a live-only run,
+    neither needs PostgreSQL nor connects to it. Deliberately a sync fixture so
+    it can own and close its event loop.
+    """
+    if not any(item.get_closest_marker("db") for item in request.session.items):
+        return
     asyncio.run(_check_test_database())
 
 
 @pytest.fixture
-async def db_conn():
-    """Provide an isolated database connection with automatic rollback."""
+async def db_conn(request: pytest.FixtureRequest):
+    """Provide an isolated database connection with automatic rollback.
+
+    Only a test marked db may use it. The readiness check runs only when a db
+    test is selected, so an unmarked test would reach the database unchecked.
+    """
+    if request.node.get_closest_marker("db") is None:
+        pytest.fail(f"{request.node.nodeid} uses db_conn but is not marked db")
+
     pool = await create_script_pool(min_size=1, max_size=1)
     try:
         async with pool.acquire() as conn:
@@ -93,6 +135,19 @@ def repository(db_conn) -> ArticleRepository:
 @pytest.fixture
 def usage_repository(db_conn) -> UsageRepository:
     return UsageRepository(db_conn)
+
+
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+
+
+def load_recording(prompt_identifier: str) -> dict:
+    """A recorded exchange: the article a real call asked about, and the response body it got.
+
+    scripts/measure_response_variability.py writes recordings. They are
+    replaced by recording again, never edited by hand.
+    """
+    path = RECORDINGS_DIR / f"{prompt_identifier}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 async def recorded_attempts(conn) -> list[dict]:
