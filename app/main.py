@@ -9,6 +9,7 @@ logging.basicConfig(
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
+from app import __version__
 from app.api.dependencies import get_db_pool
 from app.api.routers import articles
 from app.core.config import get_settings
@@ -19,7 +20,7 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version=settings.app_version,
+    version=__version__,
     lifespan=lifespan,
 )
 

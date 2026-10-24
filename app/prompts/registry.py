@@ -1,7 +1,7 @@
 """Prompt template loading and rendering.
 
-Templates live on disk as versioned .txt files. This module is a leaf:
-it imports nothing else from this application.
+Templates live on disk as versioned .txt files. The only application module
+this one imports is app.core.errors, for the errors it raises.
 """
 
 import re

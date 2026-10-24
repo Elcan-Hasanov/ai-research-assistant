@@ -2,7 +2,8 @@
 
 This is NOT a measurement script. No decision rule is written here and no
 threshold is derived from its output. It answers three questions that cannot
-be answered by reading code, and it captures one real payload for the tests.
+be answered by reading code. It prints what came back and saves nothing: the
+recording the tests replay is written by scripts/measure_response_variability.py.
 
 Run:
     python -m scripts.probe_structured

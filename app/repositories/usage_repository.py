@@ -41,8 +41,10 @@ class UsageRepository:
                     request_id,
                     record.attempt,
                     prompt_identifier,
-                    # Values, not members: the column holds "response", and
-                    # str() of a member gives "AttemptOutcome.RESPONSE".
+                    # Values, written out. asyncpg happens to store a str-Enum
+                    # member by its value, but that is the driver's behaviour,
+                    # not this code's; str() and an f-string of the same member
+                    # give "AttemptOutcome.RESPONSE".
                     record.outcome.value,
                     record.stop.value if record.stop is not None else None,
                     record.input_tokens,

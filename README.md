@@ -4,7 +4,9 @@ A backend service for collecting, storing, and retrieving ArXiv research papers,
 
 The project is developed as a single long-lived system rather than a series of disposable demos. It began as a data collection pipeline (v1.0), became a structured asynchronous API (v2.0), and now provides both lexical and semantic retrieval over a vector-indexed corpus (v3.0). v4.0 adds the first generation layer: a disciplined LLM integration with managed prompts, structured output, and token/cost accounting.
 
-**Latest release:** `v3.0.0` · **In development:** `v4.0.0-dev`
+**Latest release:** `v4.0.0`
+
+What changed in each release is in [`CHANGELOG.md`](CHANGELOG.md). The decisions behind a release, with the measurements that settled them, are in [`docs/decisions/`](docs/decisions/), and the gaps known to be open are in [`docs/known-gaps.md`](docs/known-gaps.md).
 
 ---
 
@@ -46,6 +48,7 @@ migrations/           Numbered, forward-only SQL migrations
 scripts/              Operational and laboratory scripts (migrate, ingest, backfill, measure_*)
 tests/                Integration and unit tests
 evaluation/           Retrieval evaluation set and findings
+docs/                 Decision records per version and the open known gaps
 ```
 
 ### Key design decisions
@@ -57,6 +60,7 @@ evaluation/           Retrieval evaluation set and findings
 - **CPU-bound work leaves the event loop.** Query encoding runs on a worker thread (`asyncio.to_thread`).
 - **Prompts are data, not code.** Templates live on disk as versioned files and are addressed by a `<name>.v<N>` identifier, so a generation can be tied to the exact prompt revision that produced it. Rendering is strict in both directions: a missing variable and an unexpected one both raise, because either one silently produces a prompt the caller did not intend.
 - **Generation is constrained at the source and validated on arrival.** Requests carry a JSON Schema so the provider constrains decoding, and the response is still validated locally against the same Pydantic model that produced that schema. The two are not redundant: constrained decoding guarantees syntax and only while the provider supports it, while local validation is the contract and holds regardless. Prompt instructions alone were measured and rejected — asked in words not to wrap its JSON in a markdown fence, the model did so on every one of 30 calls. Validation is structural: output that satisfies the schema while being factually wrong passes, which is why faithfulness is a separate concern for v6.
+- **What a use case sends is a value.** Each generation use case builds its request — messages, system prompt, token budget, schema — with a function that does no I/O, and the service only sends it. The measurement script and the live test call the same functions, so what they check is what production sends, not a copy that can drift from it.
 - **Diagnosis lives where the evidence is complete.** A parse failure has four
   possible causes — the model produced malformed JSON, `max_tokens` cut the
   stream, the model refused, or the context window overflowed — and the parser
@@ -169,7 +173,6 @@ DB_PORT=5432
 
 PYTHONPATH=.
 APP_NAME="AI Research Assistant API"
-APP_VERSION="4.0.0-dev"
 
 EMBEDDING_MODEL_NAME="BAAI/bge-small-en-v1.5"
 EMBEDDING_DEVICE="cpu"
@@ -183,7 +186,7 @@ LLM_MODEL="anthropic/claude-haiku-4.5"
 LLM_TIMEOUT_SECONDS=30
 ```
 
-`LLM_BASE_URL` selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving `LLM_BASE_URL` empty switches back to the direct path and requires the native id. The paths also differ in what they report: only the gateway says what a call cost, so on the direct path the usage records keep their token counts but leave the cost empty.
+`LLM_BASE_URL` selects the transport. Requests currently route through an Anthropic-compatible gateway, because direct provider access is closed to new accounts. The two paths do not share model identifiers: the gateway resolves names against its own catalogue, so the provider-native id returns 404 through it. Leaving `LLM_BASE_URL` empty switches back to the direct path and requires the native id. The paths also differ in what they report: only the gateway says what a call cost, so on the direct path the usage records keep their token counts but leave the cost empty. The direct path is implemented and covered by offline tests, but it has never been run against the provider's own API: that takes a key from the provider and the native model id.
 
 `LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases of one attempt.
 Each is a limit on silence within the phase, not on the length of the call —
@@ -319,15 +322,19 @@ $env:DB_NAME = "arxiv_test"; python -m scripts.migrate; Remove-Item Env:\DB_NAME
 pytest                    # full suite
 pytest -m "not db"        # deselect the database-backed tests
 pytest --collect-only -q  # verify every test is actually collected
+pytest --live -m live     # only the live tests: real provider calls, billed
 ```
 
-`-m "not db"` deselects the tests that query PostgreSQL, but it does not currently let the suite run without one: a session-scoped readiness fixture connects before selection happens, so any subset still requires `arxiv_test` to exist. Making that fixture marker-aware is open work.
+`-m "not db"` deselects the tests that query PostgreSQL, and the rest of the suite then runs without it: the database check runs only when a selected test carries the `db` marker. Because the check trusts the marker, a test that uses the database fixture without it fails at setup instead of reaching the database unchecked.
+
+Live tests are skipped unless `--live` is given. They send a real request to the configured provider, cost about a tenth of a cent each, and need no database. The switch is an option rather than a marker expression because `-m` options do not combine: a default `-m "not live"` would be replaced by any `-m` on the command line, `-m "not db"` included.
 
 ### Design
 
 - **Isolation:** Each test runs inside an open transaction that is always rolled back, including when the test raises. Cleanup is a property of the transaction, not code at the end of the test, so it cannot be skipped by an early failure. One test is the deliberate exception: it checks that a batch the database refuses part-way commits none of its rows, which a transaction rolled back afterwards would hide, so it writes through its own pool and deletes its rows in a `finally` block.
-- **Separate database:** Tests never touch the working corpus. A behavioural guard refuses to run if the target database holds more articles than a test database plausibly would.
-- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one. A usage store that refuses every write stands in for an unreachable database, so the fail-open path is tested without taking a real one down. Time is a dependency too: the retry layer's sleep and random draw are injected, and its tests replace the sleep with a recorder, so every wait is asserted without waiting.
+- **Separate database:** Tests never touch the working corpus. Before any database test runs, a guard refuses to continue if the target database holds more articles than a test database plausibly would.
+- **Hand-written test doubles, not mocks:** the embedding model and the LLM client are each replaced by a small duck-typed stand-in. Service-level doubles sit at the dependency boundary instead: one returns canned results or raises, another records which method the router dispatched to, because a request that reaches the wrong handler can still answer `200`. One double goes the other way and replaces nothing — the provider-error tests keep a real SDK client and fake only the socket beneath it, so the SDK still maps the status to its own exception class. The database is never replaced — the behaviour under test (`= ANY` semantics, `websearch_to_tsquery` conjunction, cosine distance) lives inside PostgreSQL, and mocking it would verify nothing. A double is written only where a dependency must be injected; the prompt registry and the output parser are pure and deterministic, so neither has one. A usage store that refuses every write stands in for an unreachable database, so the fail-open path is tested without taking a real one down. Time is a dependency too: the retry layer's sleep and random draw are injected, and its tests replace the sleep with a recorder, so every wait is asserted without waiting; the LLM client's clock is injected the same way, so a call's duration is asserted exactly.
+- **Recorded and live responses:** One real response from the gateway is kept in `tests/recordings/`, captured on the wire by `scripts/measure_response_variability.py` and never edited by hand. Offline tests replay it beneath a real SDK client, so parsing is checked against what the provider actually sends rather than only against hand-written bodies; hand-written bodies remain for the situations one recording cannot show, such as an absent or negative cost or a truncated answer. A live test sends the production request to the real gateway and checks only what production relies on: the answer completed, it fits the schema, and the cost and token counts arrived. It is the check on the doubles: when it fails, the provider has changed, and a new recording shows which part of the code has to follow.
 - **Mutation-calibrated:** Every test was validated by deliberately breaking the decision it claims to protect and confirming the test fails. A green suite is evidence only after this step.
 
 ---
@@ -343,9 +350,11 @@ pytest --collect-only -q  # verify every test is actually collected
 
 These artefacts form the first version of the benchmark dataset that v6's evaluation harness will build on.
 
-The `scripts/measure_*.py` family characterises the system rather than testing it: token-length distributions against the model's sequence limit, query-prefix impact on ranking, and HNSW recall versus latency across `ef_search` settings. `scripts/probe_llm.py` is a one-shot discovery probe for the LLM provider — it reports the SDK's default timeout and retry policy and dumps a raw response object, deliberately deriving no thresholds from a single sample.
+The `scripts/measure_*.py` family characterises the system rather than testing it: token-length distributions against the model's sequence limit, query-prefix impact on ranking, and HNSW recall versus latency across `ef_search` settings. `scripts/probe_llm.py` is a one-shot discovery probe for the LLM provider — it reports the SDK's default timeout and retry policy and dumps the SDK's parsed response object, deliberately deriving no thresholds from a single sample.
 
 `scripts/probe_structured.py` does the same for structured output. `scripts/measure_json_compliance.py` is a measurement rather than a probe: it compares prompt-only instruction against a schema sent with the request over repeated calls on a fixed input, with the decision rule written before the run. Its two arms are interleaved rather than run in blocks — a blocked earlier version attributed a swing in gateway load to whichever arm happened to be running, and the causal claim built on it did not survive a second run.
+
+`scripts/measure_response_variability.py` sends the request `extract_facts` sends, thirty times by default, for one fixed article, and reports for every field the project reads which values it took: the evidence for which fields the tests may assert exactly, within a range, or not at all. With `--record` it also saves one complete response, taken on the wire below the SDK, as the recording the offline tests replay.
 
 ---
 
@@ -354,7 +363,7 @@ The `scripts/measure_*.py` family characterises the system rather than testing i
 - [x] **v1.0 — Data Infrastructure:** Scraping, PostgreSQL integration, data cleaning, filtering, modular OOP structure.
 - [x] **v2.0 — Backend Fundamentals & Lexical Search:** FastAPI, pydantic-settings, router architecture, Repository Pattern, asyncpg connection pooling, PostgreSQL full-text search, Swagger UI.
 - [x] **v3.0 — Retrieval Fundamentals + Semantic Search:** Containerised pgvector runtime, SQL migrations, Sentence Transformers embeddings, `article_embeddings` schema, idempotent backfill pipeline, semantic search endpoint, HNSW index, lexical vs semantic evaluation, integration test suite.
-- [ ] **v4.0 — LLM Application:** Native LLM API, prompt template management and versioning, structured output with schema validation, error taxonomy, retry/backoff, token and cost accounting.
+- [x] **v4.0 — LLM Application:** Native LLM API through an Anthropic-compatible gateway, prompt template management and versioning, structured output with schema validation, error taxonomy, retry/backoff, per-attempt token and cost accounting, recorded and live response tests.
 - [ ] **v5.0 — RAG System:** Chunking engine, hybrid search (BM25 + vector, rank fusion), context injection, citation mechanism.
 - [ ] **v6.0 — Evaluation + Observability:** RAGAS metrics, Langfuse / OpenTelemetry tracing, cost, token and latency tracking, benchmark dataset.
 - [ ] **v7.0 — Productionization:** Docker image and Compose stack, GitHub Actions CI/CD, environment and secret management, background workers.

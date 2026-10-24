@@ -18,7 +18,6 @@ class Settings(BaseSettings):
     db_port: int = 5432
 
     app_name: str = "AI Research Assistant API"
-    app_version: str = "4.0.0-dev"
 
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"
     embedding_device: str = "cpu"
@@ -27,7 +26,7 @@ class Settings(BaseSettings):
 
     # ANN index runtime tuning. Kept >= SearchParams.limit ceiling (100) so that
     # the HNSW candidate pool is never narrower than the number of rows a caller
-    # can legally request. Nothing enforces that coupling — see 🎯 below.
+    # can legally request. Nothing enforces that coupling.
     hnsw_ef_search: int = 100
 
     # --- LLM provider ---------------------------------------------------

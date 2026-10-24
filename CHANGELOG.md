@@ -5,1002 +5,119 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+From 4.0.0 on, this file says what changed in each release. The decisions
+behind a release, with the measurements that settled them, are in
+[`docs/decisions/`](docs/decisions/); what is known and still open is in
+[`docs/known-gaps.md`](docs/known-gaps.md).
+
 ## [Unreleased]
+
+## [4.0.0] - 2026-10-24
+
+The first generation layer: an LLM extraction endpoint, built on a provider
+client, versioned prompts, structured output, an error taxonomy, retries and
+per-attempt usage records. The decisions behind it are in
+[`docs/decisions/v4.0.md`](docs/decisions/v4.0.md).
 
 ### Added
 
-- `anthropic` SDK as a direct dependency; `requirements.txt` regenerated
-  from `requirements.in`
-- LLM provider settings in `Settings`: `llm_api_key` (`SecretStr`, no
-  default — a missing credential is a configuration error and fails at
-  startup), `llm_model`, `llm_timeout_seconds`, and `llm_base_url`
-- `scripts/probe_llm.py`: one-shot discovery probe for the LLM provider.
-  Reports the SDK's default timeout and retry policy, dumps a raw
-  response object, and forces a `max_tokens` truncation to observe the
-  difference between a successful HTTP response and a complete
-  generation. Not a measurement script — no decision rule is written and
-  no threshold is derived from a single sample
-- `.env.example` extended with the four `LLM_*` keys (names only, no values)
-- `app/core/llm.py`: the single module in the application permitted to
-  import the provider SDK. Holds `LLMClient` (one `complete()` call, no
-  loop), `LLMCompletion` (the project's own return contract),
-  `CompletionStop`, `LLMError`, the `to_completion` translation
-  function, and the `create_llm_client` factory
-- `FakeLLMClient` in `tests/conftest.py`: hand-written, duck-typed
-  stand-in that returns a canned `LLMCompletion`. Second test double in
-  the project after `FakeEmbeddingModel`, and the seam every generation
-  test from the service layer onward will depend on
-- `tests/test_llm_client.py`: five translation tests built from a real
-  captured response, covering the normal case, truncation, multiple text
-  blocks, non-text blocks, and an unrecognised stop reason. No network,
-  no database, no marker
-- `jinja2` as a direct dependency. It was already present in the lockfile
-  as a transitive dependency of `torch`; relying on that would mean the
-  prompt layer breaks at import time the day the embedding stack is
-  removed from the image
-- `app/prompts/`: prompt content moved out of code and onto disk as
-  versioned `.txt` files. A leaf package — it imports nothing else from
-  this application
-- `app/prompts/registry.py`: loads every template in a directory at import
-  time and renders one on demand. Holds `PromptTemplate` (name, version,
-  system, user, declared variables), `RenderedPrompt` (exactly the two
-  pieces `LLMClient.complete()` accepts), `PromptError` with
-  `PromptLoadError` / `PromptRenderError`, and the `load_templates` /
-  `render_template` / `render` functions
-- `app/prompts/templates/summarize_article.v1.txt`: the first prompt. Its
-  variable names belong to the prompt's own vocabulary, not to the
-  database schema — the template says `abstract` where the column says
-  `summary`, and mapping the two is the calling service's job
-- `tests/test_prompts.py`: seven tests covering the file contract
-  (missing `user` section, malformed filename), both directions of
-  variable mismatch, literal brace survival, an absent `system` section,
-  and the happy path. No network, no database, no marker
-- `app/generation/`: the home of LLM output contracts. A leaf package —
-  it imports nothing else from this application, so parsing can be
-  exercised with no database, no network, and no client. `app/schemas/`
-  was rejected as the location: that package is the HTTP contract, and a
-  model validated against a provider's output does not live at the HTTP
-  boundary. A separate errors package was also rejected — in this project
-  a domain error type lives in the module that raises it, as `LLMError`
-  and `PromptRenderError` already do
-- `app/generation/extraction.py`: holds `PaperFacts` (the expected
-  response shape), `parse_paper_facts` (raw text in, validated object
-  out), `ExtractionValidationError`, and `ExtractionErrorCause`
-- `app/prompts/templates/extract_paper_facts.v1.txt`: the first prompt
-  that asks for structured output. It describes three fields in prose and
-  shows one compact example object rather than embedding a JSON Schema —
-  the schema already travels as a request parameter, and carrying it in
-  the prompt too would pay for it twice. Three different types, which is
-  the smallest set that exercises three separate validation paths
-- `tests/test_extraction.py`: three structural cases — valid JSON,
-  unparseable text, and JSON that parses but violates the schema. A
-  fourth case for output that satisfies the schema while being factually
-  wrong is deliberately absent: this layer does not catch it, and testing
-  for what a layer does not do misdescribes what the test protects.
-  Fourth database-free, network-free test file in the project
-- `scripts/probe_structured.py`: one-shot discovery probe. Answers three
-  questions that cannot be answered by reading code — whether the model
-  wraps its JSON without being asked, whether the gateway accepts
-  `output_config`, and how many content blocks come back. Not a
-  measurement script
-- `scripts/measure_json_compliance.py`: repeated measurement over a fixed
-  input, reporting a rate rather than a sample. Two arms, prompt-only and
-  `output_config`, and a classifier that names the failure shape — a bare
-  `0/10` does not distinguish a single systematic failure mode from three
-  mixed ones, and the two lead to different decisions
-- `LLMClient.aclose()`: the wrapper releases the transport it owns. The SDK
-  client holds an HTTP connection pool, which holds sockets and TLS sessions —
-  operating-system resources, not Python objects that garbage collection will
-  reclaim. The embedding model's pattern does not carry over here: it had
-  nothing to close
-- `app/services/generation_service.py`: the first orchestration layer over a
-  dependency that is non-deterministic, billed per call, and able to fail
-  partially. Holds `GenerationService`, `NoSummaryError`, `GenerationError`,
-  and two module-level helpers. `ArticleService` is untouched — the decision
-  not to open a separate service for semantic search does not transfer, since
-  that one rested on a shared repository and a shared `RetrievalResult`
-  contract
-- `GenerationService.extract_facts(arxiv_id)`: fetches one article by primary
-  key, maps its columns onto the template's vocabulary, renders the prompt,
-  carries the schema to the client, checks the stop reason, and validates the
-  text. Input selection belongs to the caller; a system that selects the
-  document by retrieval is v5
-- `GenerationService.summarize_article(arxiv_id)`: free-text summary over the
-  same pipeline, without a schema and without structured validation. It has no
-  consumer yet — no endpoint is bound to it
-- `POST /articles/{arxiv_id}/facts`. `POST` rather than `GET`: the call has a
-  side effect (it spends money) and is not idempotent (the same request
-  produces different output), neither of which a cacheable, safe method should
-  claim
-- `get_llm_client` and `get_generation_service` in `app/api/dependencies.py`.
-  The client is read from `app.state`, not constructed per request: an object
-  holding a connection pool is application-scoped for the same reason the
-  database pool is
-- LLM client acquisition and release in the application lifespan. `LLM_API_KEY`
-  now has a consumer inside the application; until this step it was required at
-  startup with nothing reading it
-- `tests/test_service_generation.py`: eight service-level tests against a real
-  database and a faked provider. The database is not replaced — the behaviour
-  under test includes the repository query and the nullable column it returns.
-  The provider is, because a real call is non-deterministic, billed and slow
-- `app/core/errors.py`: `AppError` and `FailureCategory`. Every error type the
-  application raises derives from one base, so a single handler registration
-  catches all of them through the MRO walk. The module holds vocabulary only —
-  no HTTP, no provider names, no import from an upper layer
-- `NotFoundError`, and `NOT_FOUND` as the fourth category. It is the one error
-  type defined here rather than in the module that raises it: the other seven
-  each belong to one boundary, while a missing resource belongs to any lookup
-  and two services in `app/services` raise it. Defining it in either would make
-  one service import the other
-- `public_message` on `AppError`: a second message with a second audience. The
-  first goes to the log and may name templates, models or internal state; this
-  one crosses the network and holds fixed text plus, at most, values the caller
-  supplied in the request itself
-- `log_context()` on `AppError`: the discriminating fields a fixed message
-  cannot carry. `LLMError` returns its status and provider class name,
-  `GenerationError` its stop reason, `ExtractionValidationError` its cause. The
-  four types whose message already carries the detail return nothing
-- `app_error_handler` and `_CATEGORY_CONFIG` in `app/core/exceptions.py`: one
-  table mapping each category to a status code and a log level, read by direct
-  indexing so a category missing from it fails loudly rather than defaulting
-- `tests/test_error_taxonomy.py`: twelve tests pinning error type → category,
-  public message and log context, with no HTTP involved
-- `tests/test_error_mapping.py`: five tests pinning category → status code and
-  response body. The project's first endpoint tests; the app is driven through
-  `TestClient` with `get_generation_service` overridden, so no lifespan runs and
-  no database, model or network is touched
-- Three tests in `tests/test_llm_client.py` covering the provider-error
-  translation end to end: a real `AsyncAnthropic` over an `httpx.MockTransport`,
-  so the SDK builds the request and raises the exception exactly as in
-  production and only the socket is replaced
-- `tests/test_router_articles.py`: four tests holding the wiring still, one per
-  route on the articles router. Each installs a recording double at the service
-  dependency and asserts which method the request reached, because the status
-  code cannot tell a correct route from a misrouted one
-- `app/core/retry.py`: the retry layer. `Retrier.run` takes a factory for
-  the provider call — a coroutine can be awaited only once, so each attempt
-  needs a new one — and retries while the failure's category is
-  `UPSTREAM_UNAVAILABLE`. `plan_retry` and `backoff_delay` hold the policy as
-  pure functions; the wait and the random draw are injected, so tests observe
-  every wait without waiting. Each retry logs one `WARNING` in the same
-  `key=value` shape as the HTTP error handler, because a retry that ends in
-  success leaves no other trace that the upstream faltered
-- `LLMError.retry_after` and `parse_retry_after`: the provider's requested
-  wait crosses the client boundary as seconds, read from `retry-after-ms`
-  first and `retry-after` second. Only numbers are read; a value that is
-  negative, not finite or a date counts as absent
-- `FakeLLMClient(outcomes=[...])` plays back a script of completions and
-  exceptions, one per call. A call past the end of the script fails the
-  test, so an unplanned extra attempt cannot pass unseen
-- Tests: the factory's `max_retries=0` and phase timeouts, pinned on both the
-  gateway and the direct path; `complete()`'s single provider call, pinned on
-  every retryable branch (429, 503, 529, a refused connection, a read
-  timeout); `Retry-After` parsing and its arrival on the error; the retry policy
-  and loop (test_retry.py), including the order of its checks: a Retry-After overrides
-  neither the attempt budget nor the category; both service methods retrying through
-  the retrier they ship with. The suite stands at 124 tests
-- `LLMCompletion.elapsed_seconds` and `LLMError.elapsed_seconds`: every
-  provider call is timed inside `LLMClient.complete()`, on success and on
-  failure, with an injected clock that defaults to `time.perf_counter`. Only
-  the difference between two readings is used, so the clock must be
-  monotonic, which `time.time` is not
-- `LLMCompletion.reported_cost_usd` and `parse_reported_cost`: the cost the
-  gateway reports for a call, read from the SDK's undeclared `usage.cost`.
-  Anything that is not a usable price — absent, not a number, a boolean,
-  negative, not finite, too large for a float — becomes `None`, and parsing
-  never raises: a malformed accounting field must not fail a call that has
-  already succeeded and been paid for
-- `migrations/009_create_llm_attempts.sql`: the `llm_attempts` table, one row
-  per provider attempt, keyed by `(request_id, attempt)`
-- `app/core/usage.py`: `AttemptOutcome`, `AttemptRecord` and
-  `AttemptRecorder`. `observe` awaits one attempt, records how it ended and
-  passes its result or exception on unchanged. It persists nothing; the
-  service decides when and where
-- `app/repositories/usage_repository.py`: `UsageRepository.record_attempts`
-  writes one request's attempts with a single `executemany`. It only writes;
-  nothing reads the table yet
-- `get_usage_repository` in `app/api/dependencies.py`; `GenerationService`
-  takes the repository as its third argument
-- Tests: call timing and cost parsing in `tests/test_llm_client.py`; the
-  recorder in `tests/test_usage.py`; a column-by-column round trip and an
-  all-or-nothing batch in `tests/test_repository_usage.py`, with a
-  `usage_repository` fixture and a `recorded_attempts` helper in
-  `tests/conftest.py`; and four service tests for the recording itself — a
-  retried request under one id, attempts kept when the retries run out, each
-  call its own request, and a failed write that leaves the result standing
-  and logs the attempts. The suite stands at 148 tests
+- `POST /articles/{arxiv_id}/facts`: structured facts from one stored article's
+  abstract, produced by the LLM — the problem the paper addresses, its claimed
+  contributions, and whether it reports experiments of its own. It answers
+  `200`, `404`, `422`, `500` or `503`; the README says what each means
+- LLM provider settings: `LLM_API_KEY`, required at startup; `LLM_MODEL`;
+  `LLM_TIMEOUT_SECONDS`; and `LLM_BASE_URL`, which routes requests through an
+  Anthropic-compatible gateway when set
+- `app/core/llm.py`, the only module that imports the provider SDK.
+  `LLMClient.complete()` makes exactly one provider call and returns an
+  `LLMCompletion`: text, stop reason, input and output tokens, model, duration,
+  and the cost the gateway reported. A failed call raises `LLMError`, carrying
+  the status code, the provider's error type, the wait the provider asked for
+  and the duration. `create_llm_client` builds the client for the gateway or
+  the direct path, with the SDK's own retries switched off, a connect timeout
+  separate from the read, write and pool timeouts, and an optional HTTP client
+  to send through
+- `app/prompts/`: versioned prompt templates on disk, `<name>.v<N>.txt` —
+  `extract_paper_facts.v1` and `summarize_article.v1` — and a registry that
+  loads them at import and renders them with Jinja2 under `StrictUndefined`. A
+  missing variable and an undeclared one both raise `PromptRenderError`; a
+  malformed template stops the application at import with `PromptLoadError`
+- `app/generation/extraction.py`: `PaperFacts`, whose JSON Schema travels with
+  the request so that the provider constrains decoding, and
+  `parse_paper_facts`, which validates the answer locally and raises
+  `ExtractionValidationError` with its cause — `unparseable` or
+  `schema_violation` — and without the model's output
+- `app/services/generation_service.py`: `GenerationService` with
+  `extract_facts` and `summarize_article`; the second has no route yet. The
+  request each use case sends is a `GenerationRequest`, built by
+  `extraction_request` or `summary_request`, functions that do no I/O
+- `app/core/errors.py`: `AppError`, the base of every application error, with
+  four failure categories, and `NotFoundError`. In `app/core/exceptions.py`,
+  one handler turns a category into a status code and a log level, logs a
+  single `key=value` line without the traceback, and answers with a message
+  written for the caller
+- `app/core/retry.py`: a provider call that fails as upstream-unavailable — a
+  `429`, a `5xx` including `529`, a timeout or a refused connection — is
+  retried: three attempts in all, a wait that starts at half a second and
+  doubles, trimmed by at most a quarter, and a `Retry-After` honoured up to 60
+  seconds. Each retry logs a `WARNING`
+- Usage records: migration `009_create_llm_attempts.sql` creates
+  `llm_attempts`, one row per provider attempt, keyed by request id and attempt
+  number; `app/core/usage.py` records the attempts and
+  `app/repositories/usage_repository.py` writes them. A request's attempts are
+  written in one batch when it ends, whatever its outcome; a failed write is
+  logged and never changes the response. The README's Usage Accounting section
+  has the query for attempts and known cost per request
+- Scripts: `probe_llm.py` and `probe_structured.py`, one-shot discovery probes;
+  `measure_json_compliance.py` and `measure_response_variability.py`, repeated
+  measurements on a fixed input. `measure_response_variability.py --record`
+  saves one real response as a test recording
+- Tests: `FakeLLMClient`, which plays back a script of completions and
+  exceptions and records every call, and a fake clock; client tests over a real
+  SDK client with a faked socket, covering error translation, timing, cost
+  parsing, the outgoing request body, and a recorded gateway response in
+  `tests/recordings/`; prompt, extraction, retry, usage, error-mapping and
+  route-dispatch tests; service tests against the test database with a faked
+  provider, including the exact request each use case sends; and one live test
+  that sends the production request to the real gateway
+- The `live` marker and the `--live` option: live tests are skipped unless
+  `--live` is given, so a normal run never calls the provider. `pytest --live
+  -m live` runs only them
+- `anthropic` and `jinja2` as direct dependencies
+- `docs/decisions/v4.0.md`, the decisions behind this release, and
+  `docs/known-gaps.md`
 
 ### Changed
 
-- `app_version` advanced to `4.0.0-dev`; the `.env` template in the README
-  was carrying `3.0.0` and has been brought in sync. A `Settings` default
-  is only a default — an `.env` file that still sets the old value silently
-  overrides it, which is why all three (config, `.env.example`, README)
-  are updated together
-- README restructured: table of contents removed (GitHub generates one),
-  the per-file directory tree reduced to top-level directories, and the
-  `Features (v3.0.0)` section dropped. The per-file tree required an edit
-  on every added migration or test, and the feature list restated what
-  this changelog already records. Design rationale that is not derivable
-  from the code — the retrieval contract, the testing scope decision, the
-  evaluation findings — was kept
-- `CompletionStop` gains `REFUSED` and `CONTEXT_OVERFLOW`, and
-  `_STOP_REASONS` maps `refusal` and `model_context_window_exceeded` onto
-  them. The pinned SDK's `stop_reason` literal set holds seven values;
-  four were mapped in Step 3 and the rest fell to `UNKNOWN`. That was
-  correct at the time — nothing consumed them. A consumer arrived with
-  structured output: a parse failure now has three candidate causes, and
-  two of them were sitting in the same information-free bucket
-- `LLMClient.complete()` gains an optional `response_schema`, and
-  `FakeLLMClient` tracks the signature. The fake's job is to define the
-  LLM contract for tests; if its signature drifts from the real one, a
-  service that passes against the fake fails against the client and the
-  fake stops being evidence
-- Lifespan acquires resources inside `try/finally` and releases them in reverse
-  order. Previously the pool was created before the block and the teardown
-  reached through `app.state` to close it; with a second closeable resource,
-  failing to acquire the second would leak the first, and a teardown that reads
-  `app.state` raises on a path where the attribute was never set
-- `FakeLLMClient` records the arguments of every call. A canned response cannot
-  show whether the service rendered the right prompt, mapped the right columns,
-  or passed the schema at all; those are exactly the decisions this step
-  introduces. The trigger for call recording was written as this step when the
-  fake was first added. It still has no failure mode
-- The seven existing error types derive from `AppError` and declare a category.
-  `PromptError` declares one and both subtypes inherit it; inheritance of the
-  field is allowed, because the requirement is enforced by the constructor
-  signature rather than by a class-creation check
-- `GenerationService.extract_facts` and `summarize_article` return
-  `PaperFacts` and `str` rather than `… | None`, and raise `NotFoundError`
-  instead. A return value cannot be bound to an exception handler, so moving
-  the 404 into the taxonomy meant changing the service contract, not the router
-- `POST /articles/{arxiv_id}/facts` no longer raises `HTTPException`; all five
-  of its statuses now come from the same handler. `GET /articles/{arxiv_id}`
-  still raises it from a return value and is left for a separate commit —
-  `ArticleService` is untouched by this version
-- The endpoint's `responses` declares every status it actually produces. The
-  README table was carrying `200, 404, 500` and has been brought in sync
-- `handle_unexpected_error` logs without a traceback. `ServerErrorMiddleware`
-  re-raises unconditionally, so the ASGI server prints the chain anyway and the
-  handler's own copy was the second one
-- `app/core/exceptions.py` uses a module logger rather than the root logger,
-  matching every other module in the application
-- Step numbers removed from comments in application code and scripts. Nothing
-  in the repository defines them, so the references resolved to nothing; the
-  README roadmap defines versions, and a comment now either states its
-  constraint or points at a version
-- `ArticleService.get_by_arxiv_id` still returns `None` for a missing article
-  and `GET /articles/{arxiv_id}` still raises `HTTPException` from that return
-  value, so the application holds two 404 mechanisms. Closed in a separate
-  commit immediately after this one; the method has no test today, so pinning
-  its current behaviour comes first
-- The `api_client` fixture moved from `tests/test_error_mapping.py` to
-  `tests/conftest.py`, now that a second file drives the app over HTTP. Its
-  import of `app.main` is inside the fixture body rather than at module level:
-  at module level every test run would pay the five seconds that reaching
-  `sentence_transformers` costs, including the runs that never touch the app
-- `GenerationService` records every provider attempt. `_generate` gives each
-  call its own request id and recorder, runs the provider call through the
-  retrier with the recorder observing each attempt, and saves the attempts in
-  `finally`; `_save_attempts` turns a failed write into an `ERROR` log line
-  that carries the records. The public methods keep the decisions that belong
-  to each operation: finding the article, rendering the prompt, accepting the
-  completion and parsing it
-- `.env.example` notes that only the gateway reports cost, so attempts on the
-  direct path are recorded with `reported_cost_usd` empty
-- `scripts/probe_structured.py` times each call and passes the duration to
-  `to_completion`, which now requires it
-- The existing service tests take the `usage_repository` fixture, and the two
-  retry tests build their failures with the shared `unavailable()` helper
-- `tests/test_retry.py` names its sleep recorder `fake_sleep`, after what it
-  records, rather than `clock`
+- `GET /articles/{arxiv_id}` answers a missing article through the shared error
+  handler: `ArticleService.get_by_arxiv_id` raises `NotFoundError` instead of
+  returning `None` for the router to turn into an `HTTPException`, and the
+  route declares its `404` and `500`
+- The lifespan acquires the database pool, the embedding model and the LLM
+  client inside one `try`/`finally`, and closes the client and the pool in
+  reverse order
+- The test database check runs only when a selected test is marked `db`, so
+  `pytest -m "not db"` runs without PostgreSQL. A test that uses `db_conn`
+  without the `db` marker fails at setup
+- The application's version is defined in code, as `app.__version__`
+- `app/core/exceptions.py` logs through a module logger instead of the root
+  logger
+- README restructured: no table of contents, a top-level directory tree, no
+  feature list; sections added for the LLM configuration, usage accounting, and
+  recorded and live tests
+- Step numbers removed from comments in application code and scripts
+
+### Removed
+
+- The `APP_VERSION` setting. A leftover `APP_VERSION` line in a local `.env` is
+  ignored
 
 ### Fixed
 
-- `LLMClient.aclose()` called `aclose()` on the SDK client, which does not
-  have it. `AsyncAnthropic` exposes `close()`; the `aclose()` name belongs
-  to the `httpx` client one layer below, which `AsyncAPIClient.close()`
-  calls internally. Every shutdown raised `AttributeError` from the first
-  statement of the lifespan's `finally` block, so `pool.close()` below it
-  never ran and the database pool leaked — the same resource-leak shape the
-  `try/finally` restructuring was written to prevent, arriving from the
-  release side instead of the acquisition side. The wrapper keeps its own
-  `aclose()` name: the `a` prefix marks a coroutine for this project's
-  callers and does not have to match what the wrapped SDK calls it
-- `create_llm_client` builds an `httpx.Timeout` instead of passing one float.
-  The float set all four phases to 30s and lifted the connect bound from the
-  SDK's 5s; connection setup now has its own 5s bound, and
-  `LLM_TIMEOUT_SECONDS` bounds the read, write and pool phases. Its meaning
-  narrowed with it — an idle limit per phase, not a limit on the call — and
-  the comments in `config.py` and `.env.example` say so
-- `GenerationService` runs both provider calls through a `Retrier` it
-  constructs itself. Only the provider call is retried: the record is read
-  and the prompt rendered once, so every attempt repeats the same request
-- `LLMError.log_context()` includes `retry_after` only when the provider sent
-  one. An unconditional key would put `retry_after=None` on every error line,
-  and the existing tests compare the context whole, so they hold that shape
-
-### Decisions
-
-- **Provider transport (measured, revisited):** the original choice was a
-  direct connection to `api.anthropic.com`, with aggregators rejected on
-  the grounds that two stacked abstraction layers make it impossible to
-  tell whose behaviour is being observed. That decision was reopened
-  against its own written trigger — a real access barrier — when the
-  provider console proved closed to new accounts. Requests now route
-  through an Anthropic-compatible gateway via `llm_base_url`, using
-  `auth_token` (Bearer) rather than `api_key` (`x-api-key`). The trigger
-  to revisit is direct provider access becoming available; `llm_base_url`
-  defaults to `None`, so returning to the direct path is a `.env` change,
-  not a code change
-- **Gateway model identifiers are not provider-native.** The compatibility
-  endpoint is wire-compatible on request and response shape but resolves
-  model names against its own catalogue: the provider-native id
-  (`claude-haiku-4-5-20251001`) returns `404`, and the gateway form
-  (`anthropic/claude-haiku-4.5`) is required. Because model choice lives
-  in configuration rather than in code, this was a one-line `.env` change
-- **Gateway `usage` is richer than the native contract (revisited).**
-  Responses through the gateway carry `cost`, `cost_details`, `provider`,
-  and `speed` alongside the two fields the provider's own API returns. The
-  original decision was not to trust them, because they disappear on the
-  direct path, and to have Step 9 compute cost from `input_tokens` /
-  `output_tokens` against our own price model. Step 9 reversed it: each
-  attempt record keeps the cost the gateway reports, as
-  `reported_cost_usd`, and leaves it empty on the direct path. A price
-  model would be a second source of truth, maintained by hand and silently
-  wrong the first time a price changed, and it would only estimate a figure
-  the gateway already states for the call. The direct path loses nothing it
-  had: tokens are recorded on both paths, so a price model can still be
-  applied to any row later. The first live record matched list price
-  exactly (see Measurements). Trigger: a consumer that needs a cost on the
-  direct path, or a reported cost that disagrees with list price times the
-  recorded tokens
-- **SDK defaults confirmed against documentation, not inferred from one
-  run.** Observed `max_retries=2` and a 600-second default timeout match
-  the published SDK behaviour. The agreement matters: a single
-  observation through a gateway could have reflected an overridden value,
-  and Step 8's retry budget depends on knowing which of the two is true
-- **No SDK type crosses the boundary.** Seven fields leave this module:
-  text, stop, `input_tokens`, `output_tokens`, model and, since Step 9,
-  `elapsed_seconds` and `reported_cost_usd`. Of the gateway's extra fields
-  only `cost` crosses, as the optional `reported_cost_usd` (see the
-  revisited decision above); `provider`, `speed` and `service_tier` are
-  still dropped — they vanish on the direct path, so code reading them
-  would break silently the day direct access is restored. The response
-  `id` is also excluded; its format differs between the two paths, and
-  Step 9's correlation uses a request id the service generates, so the
-  provider's id still has no consumer. No `ABC` or `Protocol` is
-  introduced: with
-  a single implementation, an interface can only be a copy of that
-  implementation's signature. Trigger: a second provider actually being
-  connected
-- **The SDK's own retry policy is switched off (`max_retries=0`).** Left
-  at its default of 2, it would multiply with the retry budget added in
-  Step 8 rather than add to it — a three-attempt budget becoming nine
-  billed calls. The failure would surface in Step 8, in a file that does
-  not mention retries, which is why it is closed here
-- **The error type carries data, not just a message.** `LLMError` holds
-  the provider's status code and the provider exception's *type name* as
-  a string. Without them, Step 7's taxonomy would have to either import
-  the SDK to catch its exception classes — defeating the boundary — or
-  parse error text. The message itself is a fixed string: SDK errors can
-  attach the request body, and that body will hold prompts and, later,
-  retrieved context. `getattr` is used for the status code because
-  connection and timeout errors do not carry one
-- **Stop reasons are mapped into this project's vocabulary, with a
-  fallback.** The provider's strings are confined to a lookup table and
-  an unrecognised value resolves to `UNKNOWN` instead of raising — a
-  unilateral addition on the provider's side should not break working
-  code. `stop_sequence` is folded into `COMPLETED` because no stop
-  sequence is configured; trigger to split it: one actually being passed
-- **The model identifier is read from the response, not from the
-  request.** The gateway resolves model names against its own catalogue,
-  so the configured value and the value actually used need not match.
-  Step 9 records the model that was used, not the one that was asked for
-- **Nothing is wired into the application yet.** The client is not placed
-  on `app.state` and no dependency accessor exists, because no consumer
-  does. Wiring arrives in Step 6 alongside the endpoint that needs it.
-  For the same reason `FakeLLMClient` has no error mode and records no
-  calls; both are added when a test requires them
-- **Translation is a module-level function rather than a method**, so it
-  can be exercised without constructing a client or reaching the
-  network. Testing the full client path through a mock HTTP transport
-  was rejected: it would bind the tests to wire JSON while the client
-  has no behaviour beyond one call and a translation. Trigger: the
-  client acquiring behaviour beyond that
-- **Template engine: Jinja2, configured with `StrictUndefined`.** Two
-  constraints drove the choice: prompts carry literal braces (Step 5's
-  structured-output schema examples), and a missing variable must be
-  loud. `str.format` was rejected because escaping every brace stops the
-  file from being plain text a human can copy into a playground —
-  defeating the reason for putting prompts on disk at all.
-  `string.Template` satisfies both constraints with zero dependencies and
-  was the initial choice; it was reversed because it forces a planned
-  engine migration once a prompt needs iteration, and the roughly half
-  hour saved today does not cover that. Jinja2's unused loop support
-  costs nothing: an unused capability inside a dependency carries no
-  maintenance, unlike an unused abstraction one writes oneself
-- **Both directions of variable mismatch are errors.** A declared
-  variable the caller omitted, and a supplied variable the template never
-  declared, both raise. The second is the one no library catches: Jinja2
-  silently ignores extra keys, so the caller believes data was injected,
-  the data never reaches the prompt, the model answers fluently from a
-  partial input, and the call is billed. Mutation testing confirmed the
-  asymmetry — removing the missing-variable check still fails loudly via
-  `StrictUndefined` (with a worse message), while removing the
-  extra-variable check produces no error at all
-- **Errors carry the prompt identifier.** Jinja2's `UndefinedError` names
-  the variable but not which prompt or which version failed; that
-  information exists only in the registry. Two types, split by who can
-  catch them: load failures happen at import and kill the process before
-  anything can handle them, render failures happen in front of a caller
-- **The version lives in the filename** (`<name>.v<N>.txt`), parsed into a
-  name and an integer at load time. An integer rather than semver, because
-  a prompt has no API surface for compatibility to describe; all a version
-  has to express is order. Step 9 persists the identifier as written
-  (`extract_paper_facts.v1`), so a query that orders by version has to
-  read the integer back out of it (see Known gaps). In the filename rather
-  than in
-  file-internal metadata, because a frontmatter version can drift from the
-  filename and nobody notices. A filename that does not match the pattern
-  is an error, not a skipped file — skipping would hide the prompt's
-  existence until something asked for it and got "not found"
-- **Templates load once, at import, with no wiring.** The path resolves
-  against the module's own location rather than the working directory,
-  unlike `scripts/migrate.py`. Nothing is placed on `app.state` and no
-  dependency accessor exists: that pattern is for resources that are
-  expensive or need closing, and a few KB of text is neither. Eager
-  loading buys fail-fast for free — a malformed template raises during
-  import, so `uvicorn` never starts, rather than surfacing on the first
-  request
-- **One file per prompt, with named sections.** `user` required, `system`
-  optional and rendered as `None` when absent, matching
-  `complete(system=None)`. Two files per prompt was rejected because
-  nothing forces them to move together across a version bump. TOML and
-  YAML were rejected not because they cannot hold the text — a YAML block
-  scalar can — but because they add a parser's worth of failure surface
-  and stop the file from being plain text
-- **Decision (calibrated):** all three checks this step introduces were
-  verified by mutation. Removing the missing-variable check left one test
-  red on the error message rather than the exception type; removing the
-  extra-variable check left one test red with nothing raised at all.
-  Removing `StrictUndefined` broke nothing, because the pre-check shadows
-  it — recorded as a gap: the case it guards is a missing attribute on a
-  supplied object, which no template in the project currently uses
-- **Native structured output (measured, reversed).** The initial decision
-  was to rely on prompt instructions alone and validate locally, on three
-  grounds: gateway support was unverified, using it would widen Step 3's
-  signature, and its only benefit — a lower validation-failure rate — had
-  never been measured. All three were tested. The gateway accepts
-  `output_config`. The failure rate was measured on a fixed input with
-  the decision rule written first: **prompt-only produced directly
-  parseable JSON 0 times in 30, `output_config` 30 times in 30.** Every
-  prompt-only failure had the same shape — the model wrapped its JSON in
-  a markdown fence, despite the prompt forbidding it in those words. A
-  prompt instruction is a soft constraint competing with a formatting
-  prior, not a rule. Stripping the fence in code was the third option and
-  was rejected: it is correct only as long as one can enumerate the
-  shapes a model might emit, and `{fence: 30}` is an observation about
-  today's model, not a contract. Migration cost was at its lowest here —
-  `complete()` still has no caller, so nothing broke
-- **Local validation stays regardless.** Zero failures in 30 calls does
-  not bound the true failure rate near zero; with no failures in 10
-  trials the conservative upper bound on the failure rate is about 30%.
-  No practical sample size would license removing the validation layer,
-  which is why none was taken. Native constrains syntax; local validation
-  is the contract, and the contract must not depend on a provider feature
-- **The schema crosses the boundary as a plain `dict`.** The caller
-  supplies JSON Schema; wrapping it in the provider's envelope is the
-  client's job. Accepting a Pydantic model class instead was rejected:
-  the client would then have to know that a task has a response shape,
-  which is the same leak the prompt boundary already avoids. The
-  observable form of this decision: `grep -rln "output_config" app/`
-  returns one file. The schema's source is the Pydantic model in
-  `extraction.py`; the service that will carry it to the client arrives
-  in Step 6
-- **One error type, carrying a discriminator.** Unparseable text and a
-  schema violation reach Step 7's taxonomy at the same position — neither
-  is retryable and the caller behaves identically — so two types would be
-  a split with no consumer. Collapsing the *types* is not collapsing the
-  *information*: `ExtractionErrorCause` distinguishes the two cases, in
-  this project's vocabulary rather than Pydantic's. Naming the cause
-  `json_invalid` after Pydantic's internal error string was rejected for
-  the same reason provider stop reasons are mapped rather than passed
-  through — a library upgrade would then change a domain contract
-- **The error carries no model output.** Pydantic's `errors()` entries
-  include an `input` key holding the value that failed, and `str()` on a
-  `ValidationError` embeds it for some error types but not others. Only
-  `type`, `loc`, and `msg` are copied, by allow-list rather than by
-  deleting `input` — a deny-list silently leaks the day the library adds
-  a field. Measured: with the canary in the field that fails validation,
-  removing both defences leaves the leak test red; with the canary in any
-  other field the same mutation passes all three tests
-- **Field names belong to the prompt's vocabulary, not the database's.**
-  Symmetric with the template-variable decision from Step 4: mapping is
-  the calling service's job. The schema is kept minimal — every field is
-  one more thing the model must get right and one more way validation can
-  fail. A `reasoning` field, which gives a constrained model somewhere to
-  think before committing to values, was considered and deferred: its
-  benefit is unmeasured here, and it is reassessed together with any
-  future change to the constraint decision
-- **No repair layer, no retry on validation failure.** The scope says
-  validate, not repair, and a repair loop is a retry under another name —
-  both calls are billed. Trigger: validation failures being seen in
-  practice and repeatably
-- **Nothing is wired into the application.** No service, no endpoint,
-  no dependency accessor. The consumer arrives in Step 6, which will wire
-  both this and the client left unwired in Step 3
-- **Truncation diagnosis is not this layer's job.** `parse_paper_facts`
-  takes a `str`, so it never sees `stop`. That is what keeps the module a
-  leaf, and the cost is that "the JSON is incomplete because `max_tokens`
-  cut it" can only be established by whoever holds the completion and the
-  error at once — the service, in Step 6
-- **Decision (calibrated):** each behaviour this step claims to protect
-  was verified by an isolating mutation. Widening the schema's field
-  types to `Any` left exactly the schema-violation test red; forcing the
-  error cause to a constant left exactly the unparseable test red;
-  dropping `refusal` from the stop-reason table left exactly the new
-  translation test red; carrying Pydantic's raw error entries left
-  exactly the leak test red. A coarser mutation — replacing validation
-  with a bare `json.loads` — turned all three extraction tests red and
-  proved only that each protects *something*; how many tests a mutation
-  reddens is not a measure of its value
-- **The stop reason is a precondition, not an explanation.** The service checks
-  `stop` before it calls the parser, rather than reading it to explain a failure
-  the parser already reported. Two measured facts drive the ordering:
-  constrained decoding guarantees syntax but not completion, so a truncation
-  landing after the closing brace parses cleanly and a parse-first ordering
-  accepts it silently; and a refusal returns prose, which parse-first would
-  report as unparseable output — technically true, diagnostically wrong. The
-  test that separates the two orderings feeds a truncated stop reason together
-  with *valid* JSON; with malformed JSON both orderings fail and the test proves
-  nothing
-- **An article with no usable abstract is rejected before the request is sent.**
-  Rendering a null value is silent — the template engine's strict-undefined mode
-  fires on missing variables, not on `None`, and puts the literal string in the
-  prompt. The response built from it satisfies the schema, so no downstream
-  layer catches it. Substituting an empty string, as the embedding pipeline
-  does for the same column, was rejected: the pattern transfers but its
-  conclusion does not, because that path costs CPU and this one costs a billed
-  call plus a persisted invention
-- **Two error types, split by when they occur rather than by what caused them.**
-  `NoSummaryError` is raised before any provider call and carries no token cost;
-  `GenerationError` is raised after one and always does. That boundary is what
-  the retry budget and the usage accounting each rely on: a `NoSummaryError`
-  leaves no attempt to record, and a `GenerationError` always comes after
-  one. `GenerationError`
-  carries the stop reason as data rather than folding four situations into one
-  message — truncation is retryable with a different token limit, a refusal is
-  not retryable at all, and a context overflow is not retryable without
-  shrinking the input. Same rule as the two error types before it: the type
-  carries data, so the layer above classifies without importing anything or
-  parsing a string. The message is a fixed string
-- **Not-found stays a return value.** The service returns `None` and the router
-  raises the HTTP error, as the article endpoint already does. An exception
-  handler binds to an exception type and cannot bind to a return value, so
-  moving this into the global handler would mean promoting a lookup's expected
-  outcome into an exception — a separate decision, revisited in the step that
-  builds the domain-error handlers
-- **No endpoint test.** The handler registered for bare `Exception` returns its
-  response and then re-raises, so the test client's default settings surface the
-  exception instead of the 500. Writing the first HTTP-level test in the project
-  to pin a behaviour the next step will change was not worth it; the three paths
-  were exercised by hand against the running application instead
-- **The second generation task shares preparation, not validation.** Fetching,
-  the empty-abstract check and rendering became module-level helpers once a
-  second method needed all three; the structured path keeps its schema and its
-  parser, and the free-text path has neither. The stop check is shared, because
-  an incomplete generation is unusable regardless of the output shape
-- **Classification is carried on the error type, not looked up in a central
-  table.** A table would let a newly added type fall through to a default while
-  nothing complained; a required keyword-only constructor argument means a type
-  that supplies no category cannot be constructed at all. The enforcement is
-  the signature, so no `__init_subclass__` check was written: a mechanism was
-  drafted twice and both drafts leaked — the first through `hasattr` walking
-  the MRO, the second through an `is_abstract` escape hatch that is itself
-  inherited
-- **One handler registered on the base type, not one per type.** Because
-  classification is data, the handler body does not branch on the concrete
-  type; per-type registration would register the same function eight times and
-  force `app/core/exceptions.py` to import four upper-layer modules, breaking a
-  direction rule that has held since v2. Trigger: one type needing HTTP
-  behaviour different from its category's — the MRO walk resolves a specific
-  registration ahead of the base one
-- **HTTP status is not a field on the error type.** Error types carry a
-  category in our own vocabulary; the translation to a status code happens only
-  at the outermost layer. A status on the type would make a retry loop or a
-  background worker — neither of them HTTP consumers — carry HTTP vocabulary
-- **No `retryable` field.** Across all thirteen failure modes, retryability is
-  `category is UPSTREAM_UNAVAILABLE`; a second hand-declared field is a second
-  field that can contradict the first. Trigger: a mode becoming retryable
-  without being upstream-unavailable — the two known candidates are a
-  truncation retried with a larger `max_tokens` and a schema violation retried
-  against non-deterministic sampling, and both already have their own triggers
-- **Domain errors are logged without a traceback; unclassified ones keep
-  theirs.** The exception chain carries what the error types were built to
-  withhold: a chained `ValidationError` prints the rejected value in
-  `input_value`, and an SDK error's message embeds the provider's full response
-  body. The allow-list protects the error object, not Python's chain. A genuine
-  bug has no structured fields, so for it the traceback is the only evidence
-- **`handle_database_error` left as it is.** The concrete reason to touch it
-  was a reported leak of connection parameters; the leak could not be
-  reproduced this step, and a failed connection raises `ConnectionRefusedError`,
-  which is not a `PostgresError` and never reaches that handler. Trigger: a
-  leak observed on the `PostgresError` path
-- **Not found joined the taxonomy.** An endpoint's success/failure line follows
-  the contract it declares, not how ordinary the event is: `POST /facts`
-  promises a `PaperFacts` object, and a missing article means it cannot be
-  produced — the same reasoning already applied to a model refusal. The
-  alternative kept status codes defined in two places, so the handler was not
-  the single source of the set an API can return. The member needed three
-  exceptions to the rules the other categories follow: `INFO` rather than
-  `WARNING`/`ERROR`, an interpolated public message rather than a fixed
-  literal, and a home in `errors.py` rather than in the module that raises it.
-  Trigger: a fourth
-- **`public_message` may interpolate values the caller supplied.** The rule was
-  written as "never interpolates anything" and was relaxed deliberately when
-  the 404 body had to keep naming the requested id. A value that arrived in the
-  caller's own URL is not a leak; a provider response, model output or piece of
-  internal state still is
-- **The provider-error translation is tested through the real SDK, not through
-  `FakeLLMClient`.** A double raising a hand-built `LLMError` would only assert
-  what the test itself constructed. Driving a real `AsyncAnthropic` over a
-  faked socket means the SDK maps the status to its own exception class and the
-  client translates that, which is the behaviour the whole taxonomy rests on.
-  It also covers the branch where `status_code` is absent: a transport-level
-  connection failure produces `APIConnectionError`, a class that has no such
-  attribute at all. `FakeLLMClient` still has no failure mode, and its written
-  trigger fired this step and was declined
-- **`RetryableError` and `WorkloadIdentityError` are out of scope because they
-  are unreachable, not because they are unlikely.** `RetryableError` is an
-  input to the SDK's retry policy — something middleware raises to request a
-  retry — and the SDK never raises it; `WorkloadIdentityError` comes only from
-  the workload-identity credential providers, which a plain `api_key` never
-  engages. The earlier note describing the first as a gap in `except
-  anthropic.APIError` was a reachability error
-- **This file is doing four jobs and will be split at the version tag.**
-  `Added`/`Changed`/`Fixed` are a changelog; `Decisions` is an architecture
-  decision record, `Measurements` is the evidence behind it, and `Known gaps`
-  is an issue list. Measured across versions the file grows roughly fivefold
-  per release — 6, 21, 192, 470 lines — and `Decisions` is already 54% of the
-  unreleased section. The lifetimes conflict: a changelog entry is written once
-  and frozen, while a decision can be superseded, and three were this version.
-  Writing a superseded decision into a frozen document is what produced the
-  correction line that used to sit under the `test_llm_client.py` entry.
-  Deferred to the `v4.0.0` tag rather than done now, because the version close
-  rewrites this file anyway and splitting earlier means doing it twice.
-  Measurements will move into the decision that used them, not into a file of
-  their own; separating them would leave the decisions without their evidence
-- **Route tests assert which service method ran, not the status code.** A
-  route can disappear without the URL going dark: with `/articles/search`
-  deleted, the request matched `/articles/{arxiv_id}` and was served as a
-  lookup for an article whose id is `search`. The status assertion passed on
-  that path and only the call record caught it. The same reasoning that put a
-  `calls` list on the LLM double applies one layer up — when a wrong path can
-  produce a right-looking result, the interaction is the evidence, not the
-  outcome
-- **The router is tested for dispatch, not for existence.** An existence check
-  — introspecting `app.routes`, or asserting the URL answers at all — passes in
-  exactly the case that broke, because the catch-all answered. What needed
-  holding still was the pairing between a URL and the method that serves it,
-  and only a real request through the stack demonstrates it
-- **The unit of record is the attempt, not the request.** A retried request
-  makes several provider attempts and any of them may have been billed — a
-  timed-out call included — so recording only the request, or only its last
-  attempt, would hide exactly the cost a retry adds. The design criterion was
-  that "how many attempts did this request take, and what did they cost?"
-  can be answered from the records, and one query over `llm_attempts` does
-  (README, Usage Accounting). Rows are keyed by `(request_id, attempt)`; the
-  request id is a `uuid4` the service generates for each logical request.
-  Rejected: separate request and attempt tables, while nothing describes a
-  request beyond its attempts; one row per request with aggregate counters,
-  which cannot say which attempt cost what; and structured logs alone, which
-  cannot answer the criterion with a query. Trigger: a v6 tracing backend
-  that carries these fields end to end
-- **One table, and the outcome says what an empty column means.** A
-  response, a translated provider error and an unclassified exception share
-  `llm_attempts`, told apart by `outcome`. Empty means unknown or not
-  applicable, and the outcome decides which: a response has no status code
-  to report, while a failed attempt's tokens are unknown, not zero
-- **No `ON CONFLICT`.** Writing a request's attempts twice is a bug; the
-  primary key refuses the second write instead of letting its cost be
-  counted twice. It cannot see one attempt written under two request ids —
-  that is the service's to prevent, and a service test holds it
-- **One `executemany` per request, after the request ends.** One call is
-  all-or-nothing on a pool and on a connection alike, so a request is never
-  left half recorded. Writing each attempt as it happened would put a
-  database round trip between retries and could leave a partial request
-  behind. The cost is that the attempts wait in memory until the request
-  ends (see Known gaps)
-- **The records are written whatever the outcome.** The write sits in
-  `finally`, so a request whose retries ran out — billed, perhaps, with
-  nothing to show for it — is recorded like any other. A write placed after
-  the call returns would lose exactly those attempts
-- **A failed write never changes the outcome (fail-open).** By the time the
-  write runs, the provider calls are over and the caller's result is
-  settled. An exception raised in `finally` replaces it: a paid-for answer
-  would become a `500`, and a `503` would become a `500` that blames the
-  database (measured). The failure goes to an `ERROR` line carrying the
-  records, so the loss is visible and recoverable rather than silent.
-  `Exception` is caught, not `BaseException`: a cancellation is not a failed
-  write and keeps propagating
-- **The recorder is transparent.** `observe` re-raises the original
-  exception with a bare `raise`: the retrier reads its category and
-  `retry_after`, and the HTTP layer picks a handler by its type, so a
-  wrapped exception would turn a `503` into a `500` (measured). It catches
-  `Exception`, not `BaseException`, because nothing in the application
-  cancels an attempt yet. Trigger: the first change that does, such as a
-  deadline, needs its own branch — a cancelled attempt may still have been
-  billed
-- **The request id and the recorder belong to one call, not to the
-  service.** One instance may serve several calls — FastAPI builds one per
-  HTTP request, but tests and scripts need not — and a recorder kept on the
-  instance would carry one call's attempts into the next call's rows, under
-  the new id and prompt. The primary key would not catch it
-- **`_generate` holds the mechanism; the public methods keep their
-  decisions.** Finding the article, rendering the prompt (and refusing an
-  article without an abstract), accepting the completion and parsing it
-  differ by operation; how a provider call is made — retried, observed,
-  recorded — is the same for every operation and has one home. The prompt
-  identifier is written once per method and feeds both the rendering and the
-  record, so a row cannot name a prompt that was not sent
-- **`009` has no `IF NOT EXISTS`.** On a database whose schema already holds
-  the table but whose ledger does not, `IF NOT EXISTS` would skip the
-  statement with a notice nobody sees and record the migration as applied,
-  hiding the drift. Without it the runner fails loudly and records nothing
-- **Schema changes go through `scripts/migrate.py` only.** The runner records
-  each file in `schema_migrations` in the transaction that applies it; the
-  files themselves are not re-runnable. A file run by hand changes the
-  schema without the ledger, and the runner then fails trying to apply it
-  again — which is how the working database had drifted, found this step
-  when the runner, asked to apply `009`, stopped at `003`. It was repaired by
-  recording the files already in the schema in the ledger, without running
-  them
-- **The batch test runs outside a transaction.** Inside one, the rollback
-  that keeps the connection usable after the refused statement would also
-  erase a half-written batch, so a half write and no write would look the
-  same; a version built on a savepoint passed against a per-row
-  implementation. The test writes through its own pool and deletes its rows
-  in `finally`
-- **Service tests assert only what the service decides.** Which rows exist,
-  how they group into requests, their numbering and their prompt belong to
-  the service; token, model, cost and timing values belong to the recorder
-  and the repository and are tested there. Expected values are literals,
-  never the code's own enum values, and the exhausted-retry test's three
-  failures carry distinct status codes, so each row can come from only one
-  attempt. Rows are compared whole, after sorting where their order is not
-  defined, so a failure shows the difference rather than `assert False`
-- **No separate test for a billed but unusable response.** The recorder test
-  shows that a truncated response is recorded, and the exhausted-retry test
-  shows that the service writes when a request fails; as long as the service
-  does not filter records, the case is their composition. Trigger: the
-  service filtering records
-
-### Measurements
-- **JSON compliance, fixed input, decision rule written first.**
-  Prompt-only 0/30 directly parseable, every failure a markdown fence;
-  `output_config` 30/30. Three runs of ten per arm
-- **Schema token cost.** Input tokens per call: 247 with no schema, 449
-  with a hand-written schema (230 characters), 500 with the schema
-  Pydantic generates (284 characters). The 51-token difference is
-  entirely `title` metadata Pydantic attaches to every field and to the
-  model; it constrains nothing. Not stripped: doing so requires a custom
-  schema generator, and 51 tokens is not a measured cost problem.
-  Trigger: the schema growing in v5. The other half of the original
-  trigger, the schema's share showing up in Step 9's accounting, cannot
-  fire: the records keep input tokens per attempt, not the schema's share
-  of them. Note the density — 284
-  characters cost 253 tokens, roughly 3.5 times the token-per-character
-  rate of prose, because JSON punctuation tokenises badly
-- **`additionalProperties` is not required by this gateway.** Pydantic's
-  schema omits it and was accepted 10/10. Some providers' strict modes
-  require it; this one does not
-- **Input tokenisation is deterministic, sampling is not.** Input token
-  counts were identical across every call in every run; output counts
-  were not. A cost estimated before a call can be exact on the input side
-  and only on the input side; Step 9 records what each call used rather
-  than predicting it
-- **The two arms have the same latency; the schema costs money, not
-  time.** Under an interleaved run the medians are identical to two
-  decimals (1.76s both arms) despite arm B sending 253 more input tokens
-  per call. This is the prefill/decode asymmetry showing up as a number:
-  input tokens are processed in parallel, output tokens sequentially, so
-  a larger prompt buys a larger bill rather than a slower call. The
-  earlier 6.5x gap between arms was an artefact of the blocked design and
-  did not survive interleaving
-- **The 12.34s figure was an arm mean, not a call.** It came from a blocked
-  run in which one arm of ten averaged 12.34s and the same configuration,
-  re-run, averaged 1.65s; an earlier entry recorded it as a single call. The
-  longest single call has not been recorded anywhere, which is why the
-  timeout values are borrowed rather than set from the tail: a ten-call run
-  in calm conditions reports a calm maximum, and the tail will come from
-  the per-attempt records Step 9 now writes (`llm_attempts.elapsed_seconds`)
-  rather than from any one run
-- **A timeout bounds silence, not the call.** Over a real socket, with the
-  client's float timeout set to 2s: a response that sent one byte per second
-  for six seconds returned `200` after 6.04s; headers at 1.5s and the body
-  1.5s later returned `200` after 3.01s; a single 2.6s silence raised a read
-  timeout at 2.01s. Even without a trickle, headers and body are separate
-  reads, so one attempt can last close to twice the bound
-- **Multi-block responses did not materialise on this path.** Both arms
-  returned a single `text` block, so `to_completion` finds the payload
-  and the concern that a structured response might arrive in a
-  non-`text` block does not apply here
-- **The two exception middlewares behave differently, and this decided the log
-  discipline.** `Starlette.build_middleware_stack` routes handlers registered
-  for `500` or bare `Exception` to `ServerErrorMiddleware` and everything else
-  to `ExceptionMiddleware`. The first sends its response and then re-raises
-  unconditionally; the second does not re-raise when a handler is found. The
-  double traceback observed in Step 6 came from the first path, and registering
-  specific types removes it without any change to the handler
-- **Handler lookup walks `type(exc).__mro__`.** A handler on a base type
-  catches every descendant, and when both a base and a child are registered the
-  child wins regardless of registration order. Verified by running both
-  orderings; `HTTPException` is resolved by integer status code first, ahead of
-  the MRO walk
-- **The SDK collapses every status ≥ 500 into `InternalServerError`.**
-  `_make_status_error` maps 400, 401, 403, 404, 409, 413, 422, 429 and 529 to
-  their own classes and everything else above 500 to one. `ServiceUnavailable`
-  and `DeadlineExceeded` exist as classes but this code path never produces
-  them, so 500, 502, 503 and 504 share a class name and only the number tells
-  them apart — which is why the category is derived from `status_code` and not
-  from the class
-- **`extra=` is invisible with this log format.** Passing structured fields
-  through `logging`'s `extra` parameter sets attributes on the record, and the
-  formatter — `%(asctime)s - %(levelname)s - %(message)s` — never reads them.
-  Nothing is printed and nothing warns. Fields go into the message through
-  `%`-args instead
-- **Test suite cost is an import, not the database.** Of a 6.9-second warm run,
-  5.35s is collection and 1.55s is execution; excluding
-  `tests/test_service_retrieval.py` from collection drops it to 0.07s, because
-  that file is the only one that reaches `sentence_transformers` through
-  `ArticleService`. The 28 database cases cost roughly 1.4s in total. A first
-  cold run measured 23.85s and did not reproduce
-- **Route declaration order decides which handler wins, silently.** Starlette
-  tries routes in declaration order and the first match serves the request.
-  `/articles/{arxiv_id}` matches any single segment, `search` included, so the
-  literal routes only work while they are declared above it. Reversing the two
-  changes the answer with no warning at startup and no error at runtime:
-  `/articles/search?q=transformers` comes back `200` either way, from a
-  different handler
-- **A search term does not survive a path segment.** Compared both shapes
-  across six query strings: `cs.AI/ML` answers `404` as `/search/{q}` and `200`
-  as `/search?q=`, because `/` is a separator in a path and a value in a query
-  string. `limit` and `offset` settle it independently — both carry defaults,
-  and a path parameter cannot be omitted
-- **One retry layer, owned by the service's call site.** The loop lives in
-  `app/core/retry.py`; the service wraps only the provider call. Rejected: a
-  loop inside `complete()`, which would break the single-call invariant the
-  attempt budget rests on; and a retrying wrapper installed in the lifespan,
-  whose one line of wiring no test runs and which would hide attempts from the
-  layer that records their usage. Installed in the factory instead, it
-  would also change what `scripts/measure_json_compliance.py` measures.
-  Trigger for centralising: a second service that calls the provider
-- **The switched-off SDK policy, restored element by element.** Kept: three
-  attempts, a 0.5s base doubling per retry, a wait trimmed by at most a
-  quarter (a 75% floor suits a single caller better than full jitter, which
-  can fall to zero), and `Retry-After` honoured up to 60s. Changed: a longer
-  `Retry-After` ends the retrying, where the SDK falls back to its own backoff
-  and tries sooner than asked; the gateway's documentation asks for the header
-  to be honoured. Dropped: retrying 408 and 409, which the error taxonomy
-  classifies as internal; `x-should-retry`, not observed through the gateway;
-  and the 8s cap, which three attempts never reach. Every value is borrowed
-  from the SDK, not measured here; the per-attempt records Step 9 writes are
-  the first data to tune them, and nothing has been tuned from them yet
-- **A request that timed out is retried.** The provider may already have
-  billed it — the gateway documents that cancelling a non-streaming request
-  still bills the full response — but `max_tokens` caps that cost at about
-  $0.003 per attempt at the provider's list price, the gateway's margin
-  excluded. The decision holds only while the read bound sits well above the
-  longest generation `max_tokens` allows; otherwise a slow input times out on
-  every attempt, and retrying pays three times for nothing. Trigger: a larger
-  `max_tokens`, or records showing one request timing out on every attempt
-- **No deadline on the whole request.** A hard deadline cancels an attempt in
-  flight, and on this path cancellation saves no money and throws away a
-  result already paid for; the trickling response it would bound has not been
-  observed. A soft budget — no new wait or attempt once time runs short — is
-  deferred, because its value depends on whether a retry after a timeout ever
-  succeeds, and nothing has measured that. The rule is written before the
-  data: if retried requests outlast one attempt's ceiling of about 35s, set
-  the budget to about 60s when retries after a timeout rarely succeed, which
-  allows none, or to at least 66s when they do, which allows one. Until then
-  the worst case is about 107s through timeouts and about 157s through two
-  maximal `Retry-After` waits, absent a trickling response
-- **The service builds its own retrier.** A constructor parameter was
-  planned so tests could inject a fake sleep. A zero `Retry-After` makes the
-  shipped retrier retry at once, so the tests exercise the wiring as it ships
-  and the parameter would have no consumer. Trigger: a caller that needs a
-  different policy, such as a background worker
-- **The retry layer is typed to `LLMError`.** It is the only error that can
-  be `UPSTREAM_UNAVAILABLE` and the only one with a `retry_after`; a loop
-  typed to `AppError` would need `getattr` on a field the base type does not
-  declare. Trigger: a second error type that can be `UPSTREAM_UNAVAILABLE`
-- **Retries do not fire the streaming trigger.** Its first condition names
-  several sequential calls per request, meaning a pipeline of different calls
-  whose latencies add up for a waiting reader. A retry repeats one call, and
-  streaming a failed attempt gains nothing. Its second condition says
-  *regularly*, and retries are the exception
-- **First live record.** One `POST /articles/{arxiv_id}/facts` through the
-  gateway left one row: 644 input and 161 output tokens, 4.90s, model
-  `anthropic/claude-haiku-4.5`, reported cost $0.001449. At the provider's
-  list price for Claude Haiku 4.5 — $1 per million input tokens and $5 per
-  million output tokens — the same tokens cost $0.000644 + $0.000805 =
-  $0.001449: the reported figure is list price times the recorded tokens,
-  with no margin on the call itself. The reported model matched the
-  configured one. A request for an unknown article left no row
-- **A write error in `finally` replaces the outcome.** Over HTTP, with the
-  usage store refusing every write: with the fail-open `except`, a
-  successful call answered `200` with its facts and an exhausted retry
-  answered `503`; without it, both answered `500` with "Database service is
-  currently unavailable"
-- **A per-row write leaves half a batch.** With `executemany` replaced by one
-  `execute` per row, a batch refused at its third row left its first two
-  rows committed; with `executemany`, none
-- **Every recording decision was broken on purpose.** A recorder kept on the
-  service, `observe` moved outside the retrier, the write moved out of
-  `finally`, the fail-open `except` narrowed, the log call lowered to
-  `DEBUG` or changed to `logger.error`: each failed exactly the tests that
-  claim it. Removing the request id from the fail-open log line failed none
-  (see Known gaps)
-
-### Known gaps
-
-- Chaining the `ValidationError` puts the failing field's value in the
-  traceback. Closed for the `AppError` path this step — those errors are logged
-  without a chain. `handle_database_error` still logs one, deliberately: see
-  the decision above
-- The three conditional payload keys in `complete()` — `system`,
-  `temperature`, `response_schema` — have no unit test. The fake SDK transport
-  that was named as the blocker now exists in `tests/test_llm_client.py`, so
-  the cost of closing this is a handler that records the outgoing request body
-  rather than new infrastructure
-- The `log_level` half of `_CATEGORY_CONFIG` has no test. Changing a category's
-  level breaks nothing, and the levels carry a real decision — `NOT_FOUND` logs
-  at `INFO` precisely because it is not a malfunction. Reassessed in v6, when
-  alerting rules bind to them
-- `search_articles` does not say which search it is, while its sibling
-  `semantic_search` does. The name was accurate in v2, when there was one
-  search to name, and went stale when the second arrived rather than through
-  any decision. Renaming touches 53 occurrences across seven files plus the
-  `/articles/search` path, which is a public contract. Reassessed in v5: hybrid
-  search forces all three to be named at once, and a path change belongs on a
-  version boundary
-- A caller that gives up does not stop the attempts. At the ASGI level a
-  handler runs to completion after the client disconnects, so retries go on,
-  billed, for a reader who has left, and nothing inside the service can see
-  it. `httpx`'s own default timeout is 5s, so the first Python client written
-  with defaults carries a deadline this service cannot observe. Reassessed
-  when a caller declares a deadline
-- A gateway error sent inside a `200` raises `TypeError` in `to_completion`.
-  It is unclassified, surfaces as `500`, and is not retried: the retry layer
-  reads only categories, and this failure has none. Whether it is transient,
-  and so worth retrying, is unknown until it is classified. Documented and
-  simulated, not observed live; reassessed on first sighting
-- `summarize_article`'s own guards — the not-found check and
-  `_require_completed` — are pinned only through `extract_facts`; removing
-  either from `summarize_article` breaks no test. The method has no consumer
-  yet; reassessed when one appears
-- `Retry-After` in its HTTP-date form is read as absent, and the retry falls
-  back to the backoff. Reassessed if a date-form header is ever observed
-- A response that keeps trickling bytes is not bounded: every phase timeout
-  measures silence, and there is no deadline. Reassessed when per-attempt
-  records show an attempt outlasting connect plus read
-- The attempts of a request wait in memory until the request ends, so a
-  process that dies between a provider call and the write loses that
-  request's records. Accepted while the records serve cost visibility;
-  reassessed if they are ever used for billing
-- A request's cost read from `llm_attempts` is a lower bound whenever one of
-  its attempts failed: a failed attempt's cost is unknown, and it may still
-  have been billed. On the direct path no cost is known at all
-- Cancelled attempts are not recorded: the recorder catches `Exception`, not
-  `BaseException`. Nothing cancels an attempt today; reassessed with the
-  first change that does
-- The request id in the fail-open log line is not asserted: removing it from
-  the message breaks no test. Nothing correlates log lines by request id
-  yet; reassessed in v6, when tracing does
-- `prompt_identifier` is stored as written, so ordering by it is textual and
-  `v10` sorts before `v9`. Reassessed in v6, when records are grouped by
-  prompt version
+- An unexpected error was logged with its traceback twice — by the
+  application's handler, and again by the server, because Starlette re-raises
+  after a handler registered for `Exception` has responded. The handler now
+  logs one line and leaves the traceback to the server
 
 ---
 
